@@ -1,0 +1,17 @@
+# Cryptography — Student 1
+pycryptodome>=3.19.0
+cryptography>=41.0.0
+
+# Password Hashing — Student 2
+argon2-cffi>=23.1.0
+
+# Process Monitoring — Student 2
+psutil>=5.9.0
+
+# GUI — Student 3
+PyQt6>=6.6.0
+
+# Google Drive Cloud Backup — Student 3
+google-api-python-client>=2.108.0
+google-auth-oauthlib>=1.1.0
+google-auth-httplib2>=0.1.1

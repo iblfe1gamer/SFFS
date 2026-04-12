@@ -1,0 +1,44 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Test / tooling
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local app data (keys, encrypted config — do not publish)
+sffs_data/
+
+# First-run marker (local)
+.deps_installed
+
+# Generated / cache (graphify, etc.)
+graphify-out/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Secrets (extra safety)
+.env
+.env.*
+
+# Local course handouts (large binaries; not application source)
+GP1*.doc
+GP1*.docx
+GP1*.pdf
+GP1*.pptx

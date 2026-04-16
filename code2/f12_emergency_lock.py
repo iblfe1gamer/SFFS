@@ -61,6 +61,7 @@ import sys
 
 
 EMERGENCY_ACTIVE = False  # Global flag checked by all operations
+last_activity = time.time()
 
 
 def emergencyLock(trigger: str, sandbox_path: Path = None, session_token: str = None,
@@ -105,12 +106,8 @@ def emergencyLock(trigger: str, sandbox_path: Path = None, session_token: str = 
         print(f"Step 1 failed (flag): {e}")
 
     # Step 2: Close all open file handles (best-effort)
-    try:
-        # WHY: Closing file handles prevents attacker from accessing decrypted files
-        if sandbox_path:
-            sandbox_path.rmdir()  # This also closes any open file handles
-    except Exception as e:
-        print(f"Step 2 failed (close handles): {e}")
+    # Python does not offer a safe "close all process handles" primitive; we proceed
+    # with targeted teardown (sandbox/session/memory) instead of unsafe guesses.
 
     # Step 3: Wipe memory targets (keys, passwords, etc.)
     try:
@@ -144,11 +141,11 @@ def emergencyLock(trigger: str, sandbox_path: Path = None, session_token: str = 
     except Exception as e:
         print(f"Step 6 failed (write log): {e}")
 
-    # Step 7: sys.exit(0) — hard termination
-    try:
-        sys.exit(0)
-    except SystemExit:
-        pass  # Normal exit
+    # Step 7: terminate process.
+    # For testability we keep MANUAL/TIMEOUT graceful; high-risk triggers force exit.
+    force_exit_triggers = {"USB_REMOVED", "DEBUGGER_DETECTED", "MAX_FAILURES"}
+    if trigger in force_exit_triggers:
+        raise SystemExit(0)
 
 
 def setupUSBRemovalDetection(usb_root: Path, lock_callback) -> threading.Thread:
@@ -195,10 +192,8 @@ def setupIdleTimeout(timeout_seconds: int, lock_callback) -> threading.Thread:
     Returns:
         threading.Thread: Background monitoring thread
     """
-    last_activity = time.time()
-
     def idleMonitor():
-        nonlocal last_activity
+        global last_activity
         countdown = timeout_seconds
         check_interval = 0.5
 

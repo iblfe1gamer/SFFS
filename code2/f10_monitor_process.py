@@ -136,6 +136,7 @@ class ProcessMonitor(threading.Thread):
         self.check_interval = check_interval_ms / 1000.0  # Convert to seconds
         self.on_threat_detected = on_threat_detected_callback
         self.threat_detected = threading.Event()  # Event to signal threat
+        self._stop_event = threading.Event()
 
     def run(self):
         """
@@ -144,7 +145,7 @@ class ProcessMonitor(threading.Thread):
         Checks for debugger attachment and suspicious processes every
         check_interval_ms. On threat detection, calls callback and sets flag.
         """
-        while not self.threat_detected.is_set():
+        while not self._stop_event.is_set():
             # Check for debugger attachment
             if isDebuggerPresent():
                 self._handleThreat("DEBUGGER_ATTACHED",
@@ -159,7 +160,8 @@ class ProcessMonitor(threading.Thread):
                 break
 
             # Sleep for check interval
-            time.sleep(self.check_interval)
+            if self._stop_event.wait(self.check_interval):
+                break
 
     def _handleThreat(self, threat_type: str, details: str) -> None:
         """
@@ -170,7 +172,7 @@ class ProcessMonitor(threading.Thread):
             details: Details about the threat
         """
         self.threat_detected.set()
-        self.threat_detected.clear()  # Reset so we can detect again
+        self._stop_event.set()
 
         if self.on_threat_detected:
             try:
@@ -184,8 +186,8 @@ class ProcessMonitor(threading.Thread):
 
         Sets an event to terminate the loop.
         """
-        # Signal to stop monitoring
-        pass  # Loop will exit naturally when threat detected or manually stopped
+        # Signal to stop monitoring and allow caller to join this daemon cleanly.
+        self._stop_event.set()
 
 
 if __name__ == "__main__":

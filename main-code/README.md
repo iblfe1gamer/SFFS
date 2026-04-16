@@ -50,7 +50,7 @@ python main-code/main.py --test
 
 **Encrypt (high level):** ensure RSA keys + keystore → random AES key → `encryptFile` → `wrapAESKey` → `.aeswrap` sidecar next to `.sffs`.
 
-**Decrypt:** `unwrapAESKey` → `decryptFile` → `verifyHash`.
+**Decrypt:** controller signs an IPC envelope → isolated worker decrypts under policy → integrity verified before returning path.
 
 ## Security (summary)
 

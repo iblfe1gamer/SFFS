@@ -103,7 +103,7 @@ def createIsolatedSandbox(base_path: Path, session_id: str = None) -> dict:
 
     # Write sandbox.lock file containing session_id and timestamp
     lock_file = sandbox_path / "sandbox.lock"
-    created_time = int(os.path.getctime(lock_file.parent) / 1000) if lock_file.parent.exists() else int(time.time())
+    created_time = int(time.time())
     lock_content = f"session_id={session_id}\ncreated={created_time}\n"
     lock_file.write_text(lock_content)
 
@@ -201,9 +201,6 @@ def secureWipeDirectory(directory: Path) -> None:
             except OSError:
                 continue
 
-            # Create a buffer for wiping
-            buffer_size = max(4096, file_size // 10)  # Max 10% of file at a time
-
             # Pass 1: overwrite with zeros
             if file_size > 0:
                 zeros = bytearray(file_size)
@@ -212,7 +209,7 @@ def secureWipeDirectory(directory: Path) -> None:
             # Pass 2: overwrite with ones
             if file_size > 0:
                 ones = bytearray(file_size)
-                ones[:] = b'\xff' * (file_size // 8)
+                ones[:] = b'\xff' * file_size
                 file_path.write_bytes(ones)
 
             # Pass 3: overwrite with random bytes

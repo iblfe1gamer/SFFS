@@ -46,3 +46,16 @@
 - Windows sandbox ACLs may differ from POSIX `0700`.  
 - Cloud backup needs network + OAuth maintenance.  
 - Side-channel and physical attacks are not fully mitigated in software.
+
+## 6. Security regression checklist
+
+The following controls are pinned to automated tests in `tests/test_worker_hardening.py`:
+
+| Control | Expected behavior | Test case |
+|---------|-------------------|-----------|
+| Signed IPC envelope | Valid signature accepted | `test_verify_envelope_accepts_valid_signature` |
+| Anti-tamper envelope check | Forged signature rejected | `test_verify_envelope_rejects_tampered_signature` |
+| Replay/staleness window | Old envelopes rejected | `test_verify_envelope_rejects_stale_request` |
+| Worker output confinement | Non-sandbox output path rejected | `test_policy_guard_rejects_wrong_output_root` |
+| Worker action minimization | Non-whitelisted action rejected | `test_policy_guard_rejects_disallowed_action` |
+| Path traversal/escape guard | Child path outside parent rejected | `test_require_within_rejects_escape` |

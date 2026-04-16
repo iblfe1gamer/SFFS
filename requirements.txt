@@ -1,1 +1,3 @@
-cryptography>=41.0.0
+# Unified dependency entrypoint for the repository.
+# Keep package versions centralized in main-code/requirements.txt.
+-r main-code/requirements.txt

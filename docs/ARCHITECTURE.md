@@ -45,10 +45,18 @@ User selects file → **SFFSCore.encryptFileOperation**
 ## 5. Decrypt flow
 
 User selects `.sffs` → **decryptFileOperation**  
-→ read `.aeswrap` → `unwrapAESKey` (keystore + master password)  
-→ `decryptFile` into sandbox `decrypted_dir`  
-→ `verifyHash(hash_pre, hash_post)`  
-→ on mismatch: delete output, raise `SecurityError`.
+→ controller builds signed IPC envelope (nonce + session binding + HMAC)  
+→ spawns `main-code/isolated_worker.py` with strict worker policy  
+→ worker unwraps AES key and decrypts into sandbox `decrypted_dir` only  
+→ worker verifies `hash_pre == hash_post` and returns structured result  
+→ on mismatch or policy/signature failure: delete output, raise `SecurityError`.
+
+### 5.1 Worker boundary and policy
+
+- `isolated_worker.py` is a dedicated decrypt worker process.
+- `worker_policy.json` constrains allowed actions and output root.
+- Controller and worker use a signed envelope (HMAC-SHA256) with short TTL.
+- Emergency triggers terminate active worker processes before global lock.
 
 ## 6. Emergency lock
 

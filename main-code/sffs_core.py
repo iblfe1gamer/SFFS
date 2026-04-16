@@ -22,15 +22,21 @@ from __future__ import annotations
 import secrets
 import threading
 import zipfile
+import subprocess
+import sys
+import json
+import hmac
+import hashlib
+import time
+import os
 from pathlib import Path
 from typing import Any, Optional
 
 from f01_generate_key_pairs import generateKeyPairs
 from f02_encrypt_file import encryptFile
-from f03_decrypt_file import SecurityError, decryptFile
+from f03_decrypt_file import SecurityError
 from f04_generate_hash import generateHash
-from f05_verify_hash import verifyHash
-from f06_secure_key_storage import secureKeyStorage, unwrapAESKey, wrapAESKey
+from f06_secure_key_storage import secureKeyStorage, wrapAESKey
 from f07_create_isolated_sandbox import createIsolatedSandbox, destroySandbox
 from f09_authenticate_user import authenticateUser, initAuthDatabase, terminateSession
 from f10_monitor_process import ProcessMonitor
@@ -62,6 +68,12 @@ class SFFSCore:
         self._session_password: Optional[bytearray] = None
         # .sffs resolved path -> last decrypted plaintext path in sandbox
         self._decrypt_cache: dict[str, Path] = {}
+        self._worker_script = Path(__file__).resolve().parent / "isolated_worker.py"
+        self._worker_policy = Path(__file__).resolve().parent / "worker_policy.json"
+        self._ipc_secret = secrets.token_hex(32)
+        self._ipc_counter = 0
+        self._workers_lock = threading.Lock()
+        self._active_workers: dict[int, subprocess.Popen] = {}
 
     def initialize(self) -> dict:
         self.paths = initDriveDetection()
@@ -90,6 +102,7 @@ class SFFSCore:
         }
 
     def _on_threat_detected(self, threat_type: str, details: str) -> None:
+        self._terminate_active_workers()
         try:
             emergencyLock(
                 "DEBUGGER_DETECTED",
@@ -103,6 +116,7 @@ class SFFSCore:
             pass
 
     def _on_usb_removed(self, _reason: str = "USB_REMOVED") -> None:
+        self._terminate_active_workers()
         try:
             emergencyLock(
                 "USB_REMOVED",
@@ -138,6 +152,7 @@ class SFFSCore:
         return r
 
     def logout(self) -> None:
+        self._terminate_active_workers()
         if self.session_token and self._auth_db:
             try:
                 terminateSession(self.session_token, self._auth_db)
@@ -219,22 +234,21 @@ class SFFSCore:
         ks = next(self.paths["keys_dir"].glob("keystore_*.json"), None)
         if ks is None:
             raise FileNotFoundError("No keystore in keys_dir")
-        wrapped = wrap_path.read_bytes()
-        aes_key = unwrapAESKey(wrapped, ks, master_password)
-        dec = decryptFile(sffs_path, aes_key, Path(self.sandbox["decrypted_dir"]))
-        vr = verifyHash(dec["hash_pre"], dec["hash_post"])
-        if not vr.get("match"):
-            outp = Path(dec["output_path"])
-            if outp.exists():
-                outp.unlink()
-            raise SecurityError(vr.get("message", "Integrity verification failed"))
+        dec = self._decrypt_via_worker(
+            sffs_path=sffs_path,
+            wrap_path=wrap_path,
+            keystore_path=ks,
+            output_dir=Path(self.sandbox["decrypted_dir"]),
+            sandbox_root=Path(self.sandbox["sandbox_path"]),
+            master_password=master_password,
+        )
         if self.logger:
             self.logger.log(
                 f"Decrypt {sffs_path.name}",
                 "INFO",
                 module="SFFSCore",
                 user_id=self._user_id,
-                metadata={"out": str(dec["output_path"])},
+                metadata={"out": str(dec["output_path"]), "via_worker": True},
             )
         out = Path(dec["output_path"])
         self._decrypt_cache[str(sffs_path.resolve())] = out
@@ -243,6 +257,90 @@ class SFFSCore:
             "integrity": "verified",
             "status": "decrypted",
         }
+
+    def _decrypt_via_worker(
+        self,
+        *,
+        sffs_path: Path,
+        wrap_path: Path,
+        keystore_path: Path,
+        output_dir: Path,
+        sandbox_root: Path,
+        master_password: str,
+    ) -> dict:
+        payload = {
+            "sffs_path": str(sffs_path),
+            "wrap_path": str(wrap_path),
+            "keystore_path": str(keystore_path),
+            "output_dir": str(output_dir),
+            "sandbox_root": str(sandbox_root),
+            "master_password": master_password,
+        }
+        envelope = self._sign_worker_payload(payload)
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                str(self._worker_script),
+                "--action",
+                "decrypt",
+                "--payload",
+                json.dumps(envelope),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={
+                **os.environ,
+                "SFFS_IPC_KEY": self._ipc_secret,
+                "SFFS_WORKER_POLICY": str(self._worker_policy),
+            },
+        )
+        with self._workers_lock:
+            self._active_workers[proc.pid] = proc
+        try:
+            stdout, stderr = proc.communicate(timeout=60)
+        finally:
+            with self._workers_lock:
+                self._active_workers.pop(proc.pid, None)
+        stdout = (stdout or "").strip()
+        if not stdout:
+            raise RuntimeError(f"Worker failed (no output), rc={proc.returncode}, stderr={stderr}")
+        try:
+            msg = json.loads(stdout.splitlines()[-1])
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Worker returned invalid JSON: {stdout}") from e
+        if not msg.get("ok"):
+            raise SecurityError(msg.get("error", "Worker decrypt failed"))
+        return msg["result"]
+
+    def _sign_worker_payload(self, payload: dict) -> dict:
+        self._ipc_counter += 1
+        nonce = f"{self._ipc_counter}:{secrets.token_hex(8)}"
+        issued_at = int(time.time())
+        envelope = {
+            "payload": payload,
+            "nonce": nonce,
+            "session_token": self.session_token or "",
+            "issued_at": issued_at,
+        }
+        msg = json.dumps(envelope, sort_keys=True, separators=(",", ":"))
+        sig = hmac.new(self._ipc_secret.encode("utf-8"), msg.encode("utf-8"), hashlib.sha256).hexdigest()
+        envelope["signature"] = sig
+        return envelope
+
+    def _terminate_active_workers(self) -> None:
+        with self._workers_lock:
+            workers = list(self._active_workers.values())
+        for proc in workers:
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+                    proc.wait(timeout=2)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
     def ensure_decrypted_for_view(self, sffs_path: Path) -> Path:
         """Decrypt if needed; reuse cached sandbox file when still present."""
@@ -285,6 +383,7 @@ class SFFSCore:
         return res
 
     def shutdown(self) -> None:
+        self._terminate_active_workers()
         if self.process_monitor:
             try:
                 self.process_monitor.stop()

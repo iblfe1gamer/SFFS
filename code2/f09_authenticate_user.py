@@ -52,6 +52,15 @@ except ImportError:
 from f08_secure_memory_wipe import secureMemoryWipe
 
 
+def _compute_lock_until(failed_attempts: int) -> str | None:
+    """Return lock-until timestamp for current failed attempts."""
+    if failed_attempts < 1:
+        return None
+    # 30s, 60s, 120s, ... (cap at 1 hour to avoid pathological lockouts)
+    backoff_seconds = min(30 * (2 ** (failed_attempts - 1)), 3600)
+    return (datetime.now() + timedelta(seconds=backoff_seconds)).isoformat()
+
+
 def initAuthDatabase(db_path: Path) -> None:
     """
     Initialize the authentication database with users and sessions tables.
@@ -109,8 +118,6 @@ def registerUser(username: str, password: bytearray, db_path: Path) -> dict:
     if len(password_str) < 12:
         raise ValueError("Password must be at least 12 characters")
 
-    password_lower = password_str.lower()
-    password_upper = password_str.upper()
     has_upper = any(c.isupper() for c in password_str)
     has_lower = any(c.islower() for c in password_str)
     has_digit = any(c.isdigit() for c in password_str)
@@ -126,8 +133,7 @@ def registerUser(username: str, password: bytearray, db_path: Path) -> dict:
     password_hash = pw.hash(password_str)
 
     # Wipe password bytearray immediately after hashing
-    # Pass a copy to avoid corrupting caller's bytearray
-    secureMemoryWipe(bytearray(password))
+    secureMemoryWipe(password)
 
     # Generate user_id
     user_id = str(uuid.uuid4())
@@ -169,134 +175,92 @@ def authenticateUser(username: str, password: bytearray, db_path: Path) -> dict:
         - Strings are immutable and interned
         - This prevents accidental memory exposure
     """
-    # Check if account is locked
     conn = sqlite3.connect(str(db_path))
     cursor = conn.cursor()
-
     now = datetime.now().isoformat()
 
-    cursor.execute("SELECT locked_until FROM users WHERE username = ?", (username,))
-    row = cursor.fetchone()
+    try:
+        cursor.execute(
+            "SELECT user_id, password_hash, failed_attempts, locked_until FROM users WHERE username = ?",
+            (username,),
+        )
+        row = cursor.fetchone()
 
-    locked_until = None
-    if row and row[0]:
-        locked_until = row[0]
-        if locked_until > now:
-            conn.close()
+        # Unknown user: return generic failure without leaking user existence.
+        if not row:
+            secureMemoryWipe(password)
+            return {
+                "authenticated": False,
+                "session_token": None,
+                "user_id": None,
+                "locked_until": None,
+                "failed_attempts": 0,
+                "message": "Invalid username or password",
+            }
+
+        user_id, password_hash, failed_attempts, locked_until = row
+        failed_attempts = int(failed_attempts or 0)
+
+        # Enforce lockout window first.
+        if locked_until and locked_until > now:
+            secureMemoryWipe(password)
             return {
                 "authenticated": False,
                 "session_token": None,
                 "user_id": None,
                 "locked_until": locked_until,
-                "failed_attempts": 0,
-                "message": f"Account locked until {locked_until}"
+                "failed_attempts": failed_attempts,
+                "message": f"Account locked until {locked_until}",
             }
 
-    # Load stored Argon2id hash for username
-    cursor.execute("SELECT password_hash, user_id FROM users WHERE username = ?", (username,))
-    row = cursor.fetchone()
+        password_str = password.decode("utf-8")
+        pw = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4)
+        try:
+            is_valid = pw.verify(password_hash, password_str)
+        except VerifyMismatchError:
+            is_valid = False
 
-    if not row:
-        # Increment failed attempts for non-existent user (to prevent enumeration)
-        cursor.execute(
-            "SELECT user_id FROM users WHERE username = ?", (username,))
-        existing_row = cursor.fetchone()
-        if existing_row:
-            user_id = existing_row[0]
-            cursor.execute(
-                "UPDATE users SET failed_attempts = failed_attempts + 1 WHERE user_id = ?",
-                (user_id,)
-            )
-        else:
-            user_id = None
-
-        # Wipe password bytearray regardless of result
+        # Wipe caller-owned password buffer as soon as verification is done.
         secureMemoryWipe(password)
-        conn.close()
 
-        return {
-            "authenticated": False,
-            "session_token": None,
-            "user_id": None,
-            "locked_until": None,
-            "failed_attempts": 1,
-            "message": "Invalid username or password"
-        }
+        if not is_valid:
+            failed_attempts += 1
+            new_locked_until = _compute_lock_until(failed_attempts)
+            cursor.execute(
+                "UPDATE users SET failed_attempts = ?, locked_until = ? WHERE user_id = ?",
+                (failed_attempts, new_locked_until, user_id),
+            )
+            conn.commit()
+            return {
+                "authenticated": False,
+                "session_token": None,
+                "user_id": None,
+                "locked_until": new_locked_until,
+                "failed_attempts": failed_attempts,
+                "message": f"Invalid username or password (attempt {failed_attempts})",
+            }
 
-    password_hash, user_id = row
-
-    # Convert bytearray password to string for verification
-    password_str = password.decode('utf-8')
-
-    # Verify password with Argon2id - use same params as registration
-    pw = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4)
-    try:
-        is_valid = pw.verify(password_hash, password_str)
-    except VerifyMismatchError:
-        # Wrong password - Argon2 raises exception instead of returning False
-        is_valid = False
-
-    if not is_valid:
-        # Authentication failed
-        # Increment failed attempts
+        # Success path: reset lockout state and create session.
         cursor.execute(
-            "SELECT failed_attempts FROM users WHERE user_id = ?",
-            (user_id,)
+            "UPDATE users SET failed_attempts = 0, last_login = ?, locked_until = NULL WHERE user_id = ?",
+            (now, user_id),
         )
-        failed_attempts = cursor.fetchone()[0] or 0
-
-        failed_attempts += 1
-
-        # Apply exponential lockout: 30s * 2^(failed_attempts-1)
-        if failed_attempts > 4:
-            backoff_seconds = 30 * (2 ** (failed_attempts - 5))  # After 5 failures, cap at reasonable value
-            locked_until = (datetime.now() + timedelta(seconds=backoff_seconds)).isoformat()
-
-        # Wipe password regardless of result
-        secureMemoryWipe(bytearray(password_str, 'utf-8'))
-
-        conn.close()
-
+        session_token = secrets.token_urlsafe(32)
+        cursor.execute(
+            "INSERT INTO sessions (session_token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            (session_token, user_id, now, (datetime.now() + timedelta(hours=24)).isoformat()),
+        )
+        conn.commit()
         return {
-            "authenticated": False,
-            "session_token": None,
-            "user_id": None,
-            "locked_until": locked_until,
-            "failed_attempts": failed_attempts,
-            "message": f"Invalid username or password (attempt {failed_attempts})"
+            "authenticated": True,
+            "session_token": session_token,
+            "user_id": user_id,
+            "locked_until": None,
+            "failed_attempts": 0,
+            "message": "Authentication successful",
         }
-
-    # Authentication successful
-    # Reset failed attempts
-    cursor.execute(
-        "UPDATE users SET failed_attempts = 0, last_login = ?, locked_until = NULL WHERE user_id = ?",
-        (now, user_id)
-    )
-
-    # Generate session token
-    session_token = secrets.token_urlsafe(32)
-
-    # Insert session
-    cursor.execute(
-        "INSERT INTO sessions (session_token, user_id, created_at, expires_at) "
-        "VALUES (?, ?, ?, ?)",
-        (session_token, user_id, now, (datetime.now() + timedelta(hours=24)).isoformat())
-    )
-
-    # Wipe password string by converting to bytearray first
-    secureMemoryWipe(bytearray(password_str, 'utf-8'))
-
-    conn.commit()
-    conn.close()
-
-    return {
-        "authenticated": True,
-        "session_token": session_token,
-        "user_id": user_id,
-        "locked_until": None,
-        "failed_attempts": 0,
-        "message": "Authentication successful"
-    }
+    finally:
+        conn.close()
 
 
 def validateSession(session_token: str, db_path: Path) -> bool:

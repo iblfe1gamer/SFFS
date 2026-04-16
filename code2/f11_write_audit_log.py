@@ -86,6 +86,19 @@ class AuditLogger:
         conn.commit()
         conn.close()
 
+    @staticmethod
+    def _compute_entry_hash(
+        timestamp: str,
+        level: str,
+        event: str,
+        module: str,
+        user_id: str | None,
+        metadata_json: str,
+    ) -> str:
+        """Compute canonical hash for an audit entry."""
+        entry_str = f"{timestamp}|{level}|{event}|{module}|{user_id}|{metadata_json}"
+        return hashlib.sha256(entry_str.encode()).hexdigest()
+
     def _encryptFile(self, conn, cursor) -> None:
         """Encrypt the entire database file if encryption key provided."""
         if self.encryption_key is None:
@@ -129,8 +142,14 @@ class AuditLogger:
             metadata_json = json.dumps(metadata, default=str) if metadata else ""
 
             # Compute entry_hash (SHA-256 of all other fields)
-            entry_str = f"{timestamp}|{level}|{event}|{module}|{user_id}|{metadata_json}"
-            entry_hash = hashlib.sha256(entry_str.encode()).hexdigest()
+            entry_hash = self._compute_entry_hash(
+                timestamp,
+                level,
+                event,
+                module,
+                user_id,
+                metadata_json,
+            )
 
             conn = sqlite3.connect(str(self.db_path), timeout=30)
             cursor = conn.cursor()
@@ -170,17 +189,15 @@ class AuditLogger:
         count = cursor.fetchone()[0]
 
         if count > max_entries:
-            # Delete oldest entries
+            # Delete oldest entries by log_id threshold (FIFO)
+            delete_upto = count - max_entries
             cursor.execute(
-                f"DELETE FROM audit_log WHERE log_id <= ?",
-                (count - max_entries,)
+                "DELETE FROM audit_log WHERE log_id IN ("
+                "SELECT log_id FROM audit_log ORDER BY log_id ASC LIMIT ?"
+                ")",
+                (delete_upto,),
             )
             conn.commit()
-
-            conn.close()
-
-            # Log rotation event
-            self.log("Log rotation performed", level=INFO, metadata={"deleted": count - max_entries})
 
     def rotateLogs(self, max_entries: int = 10000) -> dict:
         """
@@ -201,7 +218,9 @@ class AuditLogger:
             if count > max_entries:
                 deleted = count - max_entries
                 cursor.execute(
-                    "DELETE FROM audit_log WHERE log_id <= ?",
+                    "DELETE FROM audit_log WHERE log_id IN ("
+                    "SELECT log_id FROM audit_log ORDER BY log_id ASC LIMIT ?"
+                    ")",
                     (deleted,)
                 )
                 conn.commit()
@@ -277,8 +296,15 @@ class AuditLogger:
             log_id, timestamp, level, event, module, user_id, metadata, stored_hash = row
 
             # Recompute hash
-            entry_str = f"{timestamp}|{level}|{event}|{module}|{user_id}|{json.dumps(metadata, default=str) if metadata else ''}"
-            computed_hash = hashlib.sha256(entry_str.encode()).hexdigest()
+            metadata_json = metadata or ""
+            computed_hash = self._compute_entry_hash(
+                timestamp,
+                level,
+                event,
+                module,
+                user_id,
+                metadata_json,
+            )
 
             if computed_hash == stored_hash:
                 valid_count += 1

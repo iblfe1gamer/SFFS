@@ -15,15 +15,14 @@
 ```
 SFFS/
 ├── plan.md                        ← this file
-├── prompts/                       ← all Claude CLI prompts
-│   ├── p00_scaffold.md
-│   ├── p01_student1.md
-│   ├── p02_student2.md
-│   ├── p03_student3.md
-│   ├── p04_main_integration.md
-│   ├── p05_runners.md
-│   ├── p06_docs.md
-│   └── p07_usb_install.md
+├── p00_scaffold.md                ← Claude CLI prompts (kept at repo root)
+├── p01_student1.md
+├── p02_student2.md
+├── p03_student3.md
+├── p04_main_integration.md
+├── p05_runners.md
+├── p06_docs.md
+├── p07_usb_install.md
 │
 ├── code1/                         ← Student 1: Crypto-Security
 │   ├── __init__.py
@@ -107,17 +106,17 @@ npm install -g @anthropic-ai/claude-cli
 # or: pip install claude-cli
 
 # Run a prompt file
-claude < prompts/p00_scaffold.md
-claude < prompts/p01_student1.md
-claude < prompts/p02_student2.md
-claude < prompts/p03_student3.md
-claude < prompts/p04_main_integration.md
-claude < prompts/p05_runners.md
-claude < prompts/p06_docs.md
-claude < prompts/p07_usb_install.md
+claude < p00_scaffold.md
+claude < p01_student1.md
+claude < p02_student2.md
+claude < p03_student3.md
+claude < p04_main_integration.md
+claude < p05_runners.md
+claude < p06_docs.md
+claude < p07_usb_install.md
 
 # Alternative: pass as argument
-claude --print prompts/p01_student1.md
+claude --print p01_student1.md
 ```
 
 ---
@@ -125,7 +124,7 @@ claude --print prompts/p01_student1.md
 ## Checkpoints
 
 ### ✅ Checkpoint 0 — Scaffold
-- [ ] All directories exist: `code1/`, `code2/`, `code3/`, `main-code/`, `docs/`, `tests/`, `prompts/`
+- [ ] All directories exist: `code1/`, `code2/`, `code3/`, `main-code/`, `docs/`, `tests/`
 - [ ] All `__init__.py` files present
 - [ ] `requirements.txt` present in `main-code/`
 

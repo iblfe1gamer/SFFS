@@ -1,0 +1,29 @@
+#include <tunables/global>
+
+profile sffs-main-code flags=(attach_disconnected) {
+  #include <abstractions/base>
+  #include <abstractions/python>
+
+  /usr/bin/python3 ixr,
+  /usr/bin/python ixr,
+  /**/SFFS/main-code/** r,
+  /**/SFFS/code1/** r,
+  /**/SFFS/code2/** r,
+  /**/SFFS/code3/** r,
+  /**/SFFS/tests/** r,
+
+  /**/SFFS/sffs_data/** rwk,
+  /**/SFFS/code1/test_output/** rwk,
+  /**/SFFS/code2/test_output/** rwk,
+  /**/SFFS/code3/test_output/** rwk,
+
+  /proc/** r,
+
+  deny /etc/** w,
+  deny /usr/** w,
+  deny /bin/** w,
+  deny /sbin/** w,
+  deny /lib/** w,
+  deny /lib64/** w,
+  deny /var/** w,
+}

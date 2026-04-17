@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from f13_init_drive_detection import initDriveDetection
+import f16_cloud_sync as cloud_mod
 from f17_config_loader import configLoader
 from f18_thread_controller import WorkerThread
 
@@ -60,6 +61,75 @@ def test_thread_controller_starts_without_blocking_main_thread() -> None:
     assert elapsed < 0.15
 
 
-@pytest.mark.skip(reason="Upload path does not re-encrypt; encryption is caller responsibility per design.")
-def test_cloud_sync_encrypts_before_upload() -> None:
-    pass
+def test_cloud_sync_upload_contract_is_deterministic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    src = tmp_path / "keys_backup.zip"
+    src.write_bytes(b"encrypted-blob")
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+
+    captured: dict = {}
+
+    class DummyMedia:
+        def __init__(self, path, resumable=True):
+            captured["media_path"] = path
+            captured["media_resumable"] = resumable
+
+    class DummyFilesApi:
+        def create(self, body=None, media_body=None, fields=None):
+            captured["create_body"] = body
+            captured["create_fields"] = fields
+
+            class _Exec:
+                @staticmethod
+                def execute():
+                    return {"id": "file-123", "name": body["name"]}
+
+            return _Exec()
+
+        def list(self, q=None, spaces=None, fields=None):
+            class _Exec:
+                @staticmethod
+                def execute():
+                    return {"files": [{"id": "folder-1", "name": cloud_mod.BACKUP_FOLDER_NAME}]}
+
+            return _Exec()
+
+    class DummyService:
+        def files(self):
+            return DummyFilesApi()
+
+    class DummyCreds:
+        valid = True
+        expired = False
+        refresh_token = None
+
+    monkeypatch.setattr(cloud_mod, "_GOOGLE_OK", True)
+    monkeypatch.setattr(cloud_mod, "loadCredentials", lambda config_dir: DummyCreds())
+    monkeypatch.setattr(cloud_mod, "build", lambda *args, **kwargs: DummyService(), raising=False)
+    monkeypatch.setattr(cloud_mod, "MediaFileUpload", DummyMedia, raising=False)
+
+    out = cloud_mod.cloudSync("upload", local_path=src, config_dir=cfg)
+    assert out["status"] == "uploaded"
+    assert captured["media_path"] == str(src)
+    assert captured["media_resumable"] is True
+    assert captured["create_body"]["name"] == f"sffs_{src.name}"
+    assert captured["create_fields"] == "id,name"
+
+
+def test_cloud_sync_upload_requires_real_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+
+    class DummyCreds:
+        valid = True
+        expired = False
+        refresh_token = None
+
+    monkeypatch.setattr(cloud_mod, "_GOOGLE_OK", True)
+    monkeypatch.setattr(cloud_mod, "loadCredentials", lambda config_dir: DummyCreds())
+    monkeypatch.setattr(cloud_mod, "build", lambda *args, **kwargs: object(), raising=False)
+
+    missing = tmp_path / "missing.zip"
+    out = cloud_mod.cloudSync("upload", local_path=missing, config_dir=cfg)
+    assert out["status"] == "error"
+    assert "local_path must be a file" in out["message"]

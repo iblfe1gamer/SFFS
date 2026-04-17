@@ -22,6 +22,7 @@ for _p in (_ROOT / "code1", _ROOT / "code2", _ROOT / "code3", _ROOT / "main-code
     s = str(_p)
     if s not in sys.path:
         sys.path.insert(0, s)
+from os_isolation import detect_isolation, ensure_secure_mode
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,6 +30,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--headless", action="store_true", help="CLI demo (no GUI)")
     p.add_argument("--student", type=int, choices=(1, 2, 3), help="Run student demo runner")
     p.add_argument("--test", action="store_true", help="Run pytest suite")
+    p.add_argument(
+        "--secure-required",
+        action="store_true",
+        help="Require OS-level isolation markers before starting",
+    )
     p.add_argument(
         "--usb-root",
         type=Path,
@@ -243,6 +249,14 @@ def run_full_app() -> int:
 
 def main() -> int:
     args = parse_args()
+    if args.secure_required:
+        ensure_secure_mode()
+    status = detect_isolation()
+    if status.get("active"):
+        print(f"[SFFS] OS isolation active: {status['mode']} ({status['reason']})")
+    elif args.secure_required:
+        # ensure_secure_mode already raised; this is defensive.
+        return 1
     if args.test:
         return run_tests()
     if args.student:

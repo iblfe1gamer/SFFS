@@ -71,6 +71,15 @@ def test_audit_log_written_and_readable(tmp_path: Path) -> None:
     assert any(e.get("event") == "pytest_event" for e in rows)
 
 
+def test_audit_log_prev_hash_chain_integrity(tmp_path: Path) -> None:
+    dbp = tmp_path / "audit_chain.db"
+    log = AuditLogger(dbp, encryption_key=None)
+    log.log("event_a", "INFO", module="tests")
+    log.log("event_b", "WARN", module="tests")
+    out = log.verifyLogIntegrity()
+    assert out["tampered"] == 0
+
+
 def test_emergency_lock_wipes_sandbox(tmp_path: Path) -> None:
     s = createIsolatedSandbox(tmp_path, session_id="el1")
     sp = Path(s["sandbox_path"])

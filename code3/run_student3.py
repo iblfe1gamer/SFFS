@@ -111,7 +111,9 @@ def _opt7() -> None:
     checks.append(("path_map_keys", all(k in paths for k in need)))
 
     key = get_random_bytes(32)
-    cd = paths["config_dir"] / "integration_test"
+    # Use a unique test directory per run so stale encrypted config from previous
+    # keys cannot trigger GCM MAC failures.
+    cd = paths["config_dir"] / f"integration_test_{int(time.time() * 1000)}"
     cd.mkdir(parents=True, exist_ok=True)
     configLoader("save", cd, {"theme": "dark"}, encryption_key=key)
     ld = configLoader("load", cd, encryption_key=key)

@@ -79,9 +79,15 @@ class AuditLogger:
                 module TEXT,
                 user_id TEXT,
                 metadata TEXT,
+                prev_hash TEXT,
                 entry_hash TEXT
             )
         """)
+        # Backward-compatible migration for existing DBs.
+        cursor.execute("PRAGMA table_info(audit_log)")
+        cols = {row[1] for row in cursor.fetchall()}
+        if "prev_hash" not in cols:
+            cursor.execute("ALTER TABLE audit_log ADD COLUMN prev_hash TEXT")
 
         conn.commit()
         conn.close()
@@ -94,9 +100,10 @@ class AuditLogger:
         module: str,
         user_id: str | None,
         metadata_json: str,
+        prev_hash: str,
     ) -> str:
         """Compute canonical hash for an audit entry."""
-        entry_str = f"{timestamp}|{level}|{event}|{module}|{user_id}|{metadata_json}"
+        entry_str = f"{timestamp}|{level}|{event}|{module}|{user_id}|{metadata_json}|{prev_hash}"
         return hashlib.sha256(entry_str.encode()).hexdigest()
 
     def _encryptFile(self, conn, cursor) -> None:
@@ -140,6 +147,11 @@ class AuditLogger:
             # Build the log entry
             timestamp = datetime.now().isoformat()
             metadata_json = json.dumps(metadata, default=str) if metadata else ""
+            cursor = sqlite3.connect(str(self.db_path), timeout=30).cursor()
+            cursor.execute("SELECT entry_hash FROM audit_log ORDER BY log_id DESC LIMIT 1")
+            row = cursor.fetchone()
+            prev_hash = row[0] if row else "GENESIS"
+            cursor.connection.close()
 
             # Compute entry_hash (SHA-256 of all other fields)
             entry_hash = self._compute_entry_hash(
@@ -149,6 +161,7 @@ class AuditLogger:
                 module,
                 user_id,
                 metadata_json,
+                prev_hash,
             )
 
             conn = sqlite3.connect(str(self.db_path), timeout=30)
@@ -156,9 +169,9 @@ class AuditLogger:
 
             try:
                 cursor.execute(
-                    "INSERT INTO audit_log (timestamp, level, event, module, user_id, metadata, entry_hash) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (timestamp, level, event, module, user_id, metadata_json, entry_hash)
+                    "INSERT INTO audit_log (timestamp, level, event, module, user_id, metadata, prev_hash, entry_hash) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (timestamp, level, event, module, user_id, metadata_json, prev_hash, entry_hash)
                 )
                 conn.commit()
 
@@ -263,7 +276,8 @@ class AuditLogger:
                 "module": row[4],
                 "user_id": row[5],
                 "metadata": json.loads(row[6]) if row[6] else None,
-                "entry_hash": row[7]
+                "prev_hash": row[7],
+                "entry_hash": row[8]
             }
 
             if level_filter and log_entry["level"] != level_filter:
@@ -284,16 +298,17 @@ class AuditLogger:
         conn = sqlite3.connect(str(self.db_path))
         cursor = conn.cursor()
 
-        cursor.execute("SELECT * FROM audit_log")
+        cursor.execute("SELECT * FROM audit_log ORDER BY log_id ASC")
         logs = cursor.fetchall()
         conn.close()
 
         valid_count = 0
         tampered_count = 0
         tampered_ids = []
+        expected_prev_hash = "GENESIS"
 
         for row in logs:
-            log_id, timestamp, level, event, module, user_id, metadata, stored_hash = row
+            log_id, timestamp, level, event, module, user_id, metadata, prev_hash, stored_hash = row
 
             # Recompute hash
             metadata_json = metadata or ""
@@ -304,13 +319,18 @@ class AuditLogger:
                 module,
                 user_id,
                 metadata_json,
+                prev_hash or "GENESIS",
             )
 
-            if computed_hash == stored_hash:
+            # Verify linked-list pointer to previous row hash.
+            chain_ok = (prev_hash or "GENESIS") == expected_prev_hash
+
+            if computed_hash == stored_hash and chain_ok:
                 valid_count += 1
             else:
                 tampered_count += 1
                 tampered_ids.append(log_id)
+            expected_prev_hash = stored_hash
 
         return {
             "total": len(logs),
@@ -333,6 +353,7 @@ def _getLogger() -> AuditLogger:
 
     if _logger_instance is None:
         _db_path = Path("./code2/test_output/audit.db")
+        _db_path.parent.mkdir(parents=True, exist_ok=True)
         _encryption_key = None  # Not encrypting for demo purposes
         _logger_instance = AuditLogger(_db_path, _encryption_key)
 

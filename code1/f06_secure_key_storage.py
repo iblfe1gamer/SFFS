@@ -65,17 +65,23 @@ import json
 import base64
 import struct
 from pathlib import Path
+from typing import Optional
+from argon2.low_level import Type, hash_secret_raw
 
 
 # KDF parameters per NIST SP 800-63B
-KDF_ITERATIONS = 310_000  # 310k iterations for SHA-256
+KDF_ITERATIONS = 310_000  # PBKDF2 fallback compatibility
+ARGON2_TIME_COST = 3
+ARGON2_MEMORY_COST = 65536  # KiB
+ARGON2_PARALLELISM = 2
 
 
 def secureKeyStorage(
     private_key_bytes: bytes,
     master_password: str,
     output_dir: Path,
-    key_id: str = None
+    key_id: str = None,
+    kdf: str = "ARGON2ID",
 ) -> dict:
     """
     Securely store an RSA private key using PBKDF2 + AES-256-GCM.
@@ -100,16 +106,29 @@ def secureKeyStorage(
     # Each key store must have a unique salt
     salt = get_random_bytes(16)
 
-    # Derive AES key from password using PBKDF2-SHA256
-    # Why: PBKDF2 is slow (intentionally) to prevent brute-force attacks
-    # Why: 310,000 iterations is NIST recommended for SHA-256
-    derived_key = PBKDF2(
-        master_password,
-        salt,
-        dkLen=32,
-        count=KDF_ITERATIONS,
-        hmac_hash_module=SHA256,
-    )
+    # Derive AES key from password (Argon2id default, PBKDF2 compatibility mode).
+    if kdf.upper() == "ARGON2ID":
+        derived_key = hash_secret_raw(
+            secret=master_password.encode("utf-8"),
+            salt=salt,
+            time_cost=ARGON2_TIME_COST,
+            memory_cost=ARGON2_MEMORY_COST,
+            parallelism=ARGON2_PARALLELISM,
+            hash_len=32,
+            type=Type.ID,
+        )
+        kdf_name = "ARGON2ID"
+    elif kdf.upper() == "PBKDF2-SHA256":
+        derived_key = PBKDF2(
+            master_password,
+            salt,
+            dkLen=32,
+            count=KDF_ITERATIONS,
+            hmac_hash_module=SHA256,
+        )
+        kdf_name = "PBKDF2-SHA256"
+    else:
+        raise ValueError(f"Unsupported KDF: {kdf}")
 
     # Generate random IV for GCM mode
     iv = get_random_bytes(12)  # GCM nonce is 12 bytes minimum
@@ -136,10 +155,13 @@ def secureKeyStorage(
 
     # Create keystore JSON
     keystore = {
-        "version": "1.0",
+        "version": "2.0" if kdf_name == "ARGON2ID" else "1.0",
         "key_id": key_id,
-        "kdf": "PBKDF2-SHA256",
-        "kdf_iterations": KDF_ITERATIONS,
+        "kdf": kdf_name,
+        "kdf_iterations": KDF_ITERATIONS if kdf_name == "PBKDF2-SHA256" else None,
+        "argon2_time_cost": ARGON2_TIME_COST if kdf_name == "ARGON2ID" else None,
+        "argon2_memory_cost": ARGON2_MEMORY_COST if kdf_name == "ARGON2ID" else None,
+        "argon2_parallelism": ARGON2_PARALLELISM if kdf_name == "ARGON2ID" else None,
         "salt": salt_b64,
         "iv": iv_b64,
         "auth_tag": auth_tag_b64,
@@ -191,15 +213,27 @@ def retrieveKey(keystore_path: Path, master_password: str) -> bytes:
     # Load keystore JSON
     keystore_data = json.loads(keystore_path.read_text())
 
-    # Re-derive AES key from password + stored salt
+    # Re-derive AES key from password + stored salt with versioned KDF support.
     salt = base64.b64decode(keystore_data["salt"])
-    derived_key = PBKDF2(
-        master_password,
-        salt,
-        dkLen=32,
-        count=KDF_ITERATIONS,
-        hmac_hash_module=SHA256,
-    )
+    kdf_name = (keystore_data.get("kdf") or "PBKDF2-SHA256").upper()
+    if kdf_name == "ARGON2ID":
+        derived_key = hash_secret_raw(
+            secret=master_password.encode("utf-8"),
+            salt=salt,
+            time_cost=int(keystore_data.get("argon2_time_cost", ARGON2_TIME_COST)),
+            memory_cost=int(keystore_data.get("argon2_memory_cost", ARGON2_MEMORY_COST)),
+            parallelism=int(keystore_data.get("argon2_parallelism", ARGON2_PARALLELISM)),
+            hash_len=32,
+            type=Type.ID,
+        )
+    else:
+        derived_key = PBKDF2(
+            master_password,
+            salt,
+            dkLen=32,
+            count=int(keystore_data.get("kdf_iterations", KDF_ITERATIONS)),
+            hmac_hash_module=SHA256,
+        )
 
     # Decrypt private key
     encrypted_key = base64.b64decode(keystore_data["encrypted_private_key"])
@@ -212,7 +246,7 @@ def retrieveKey(keystore_path: Path, master_password: str) -> bytes:
     return private_key_bytes
 
 
-def wrapAESKey(aes_key: bytes, public_key_path: Path) -> bytes:
+def wrapAESKey(aes_key: bytes, public_key_path: Path, bound_file_path: Optional[Path] = None) -> bytes:
     """
     Encrypt an AES session key using RSA-OAEP for key transport.
 
@@ -221,15 +255,34 @@ def wrapAESKey(aes_key: bytes, public_key_path: Path) -> bytes:
         public_key_path: Path to RSA public key PEM file
 
     Returns:
-        Encrypted AES key bytes (safe to store in metadata)
+        Serialized wrap payload bytes. v2 payloads include binding metadata.
     """
     # Load public key — OAEP via PKCS1_OAEP (PyCryptodome API)
     public_key = RSA.import_key(public_key_path.read_text())
     cipher_rsa = PKCS1_OAEP.new(public_key, hashAlgo=SHA256)
-    return cipher_rsa.encrypt(aes_key)
+    wrapped_key = cipher_rsa.encrypt(aes_key)
+
+    # v2 wrap envelope with key commitment and optional .sffs binding metadata.
+    envelope = {
+        "version": "2.0",
+        "alg": "RSA-OAEP-SHA256",
+        "wrapped_key_b64": base64.b64encode(wrapped_key).decode("ascii"),
+        "key_commitment": hashlib.sha256(aes_key).hexdigest(),
+    }
+    if bound_file_path is not None:
+        bound = Path(bound_file_path)
+        envelope["bound_file_name"] = bound.name
+        if bound.exists():
+            envelope["bound_file_sha256"] = hashlib.sha256(bound.read_bytes()).hexdigest()
+    return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
 
 
-def unwrapAESKey(encrypted_aes_key: bytes, keystore_path: Path, master_password: str) -> bytes:
+def unwrapAESKey(
+    encrypted_aes_key: bytes,
+    keystore_path: Path,
+    master_password: str,
+    expected_sffs_path: Optional[Path] = None,
+) -> bytes:
     """
     Unwrap an AES key that was RSA-wrapped and stored with keystore.
 
@@ -244,11 +297,40 @@ def unwrapAESKey(encrypted_aes_key: bytes, keystore_path: Path, master_password:
     Raises:
         SecurityError: If password is wrong (RSA decryption fails)
     """
+    wrapped_key = encrypted_aes_key
+    commitment = None
+    bound_file_name = None
+    bound_file_sha256 = None
+    blob = encrypted_aes_key.lstrip()
+    if blob.startswith(b"{"):
+        env = json.loads(encrypted_aes_key.decode("utf-8"))
+        if env.get("version") == "2.0":
+            wrapped_key = base64.b64decode(env["wrapped_key_b64"])
+            commitment = env.get("key_commitment")
+            bound_file_name = env.get("bound_file_name")
+            bound_file_sha256 = env.get("bound_file_sha256")
+
     # Retrieve RSA private key
     private_key_bytes = retrieveKey(keystore_path, master_password)
     private_key = RSA.import_key(private_key_bytes)
     cipher_rsa = PKCS1_OAEP.new(private_key, hashAlgo=SHA256)
-    return cipher_rsa.decrypt(encrypted_aes_key)
+    aes_key = cipher_rsa.decrypt(wrapped_key)
+
+    if commitment and hashlib.sha256(aes_key).hexdigest() != commitment:
+        raise ValueError("Wrapped key commitment mismatch")
+
+    if expected_sffs_path is not None and (bound_file_name or bound_file_sha256):
+        exp = Path(expected_sffs_path)
+        if bound_file_name and exp.name != bound_file_name:
+            raise ValueError("Wrap metadata file-name mismatch")
+        if bound_file_sha256:
+            if not exp.exists():
+                raise FileNotFoundError(f"Expected .sffs file not found: {exp}")
+            actual_sha = hashlib.sha256(exp.read_bytes()).hexdigest()
+            if actual_sha != bound_file_sha256:
+                raise ValueError("Wrap metadata file-hash mismatch")
+
+    return aes_key
 
 
 if __name__ == "__main__":

@@ -58,6 +58,17 @@ def test_verify_envelope_rejects_stale_request(monkeypatch: pytest.MonkeyPatch) 
         iw._verify_envelope(env)
 
 
+def test_verify_envelope_rejects_replayed_nonce(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SFFS_IPC_KEY", "k_test")
+    iw._SEEN_NONCES.clear()
+    payload = {"output_dir": "x", "sandbox_root": "y"}
+    env = _sign_envelope("k_test", payload, nonce="nonce-replay")
+    out = iw._verify_envelope(env)
+    assert out == payload
+    with pytest.raises(PermissionError):
+        iw._verify_envelope(env)
+
+
 def test_policy_guard_rejects_wrong_output_root(tmp_path: Path) -> None:
     sandbox = tmp_path / "sandbox"
     sandbox.mkdir()

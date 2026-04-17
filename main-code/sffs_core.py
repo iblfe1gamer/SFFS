@@ -75,6 +75,30 @@ class SFFSCore:
         self._workers_lock = threading.Lock()
         self._active_workers: dict[int, subprocess.Popen] = {}
 
+    @staticmethod
+    def _wrap_ref_path(sffs_path: Path) -> Path:
+        return sffs_path.parent / f"{sffs_path.stem}.wrapref"
+
+    def _resolve_wrap_path(self, sffs_path: Path) -> Path:
+        """
+        Resolve wrap file path with backward compatibility:
+        1) .wrapref pointer file (new opaque naming)
+        2) legacy <stem>.aeswrap sidecar
+        """
+        ref_path = self._wrap_ref_path(sffs_path)
+        if ref_path.exists():
+            try:
+                ref = json.loads(ref_path.read_text(encoding="utf-8"))
+                wrap_name = ref.get("wrap_file")
+                if isinstance(wrap_name, str) and wrap_name:
+                    candidate = (sffs_path.parent / wrap_name).resolve()
+                    # keep wrap constrained to the same directory
+                    if candidate.parent == sffs_path.parent.resolve() and candidate.exists():
+                        return candidate
+            except Exception:
+                pass
+        return sffs_path.parent / f"{sffs_path.stem}.aeswrap"
+
     def initialize(self) -> dict:
         self.paths = initDriveDetection()
         cfg_dir = self.paths["config_dir"]
@@ -203,9 +227,23 @@ class SFFSCore:
         aes_key = session_random_bytes(32)
         out_sffs = input_path.with_suffix(".sffs")
         enc = encryptFile(input_path, aes_key, out_sffs)
-        wrapped = wrapAESKey(aes_key, pub)
-        wrap_path = out_sffs.parent / f"{out_sffs.stem}.aeswrap"
+        wrapped = wrapAESKey(aes_key, pub, bound_file_path=out_sffs)
+        # Opaque/random wrap filename to reduce metadata correlation.
+        wrap_name = f"{secrets.token_hex(16)}.aeswrap"
+        wrap_path = out_sffs.parent / wrap_name
         wrap_path.write_bytes(wrapped)
+        ref_path = self._wrap_ref_path(out_sffs)
+        ref_path.write_text(
+            json.dumps(
+                {
+                    "version": "1.0",
+                    "sffs_file": out_sffs.name,
+                    "wrap_file": wrap_name,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
         h = generateHash(input_path)
         if self.logger:
             self.logger.log(
@@ -228,7 +266,7 @@ class SFFSCore:
         if master_password is None:
             master_password = self._master_password_str()
         sffs_path = Path(sffs_path)
-        wrap_path = sffs_path.parent / f"{sffs_path.stem}.aeswrap"
+        wrap_path = self._resolve_wrap_path(sffs_path)
         if not wrap_path.exists():
             raise FileNotFoundError(f"Missing AES wrap file: {wrap_path}")
         ks = next(self.paths["keys_dir"].glob("keystore_*.json"), None)

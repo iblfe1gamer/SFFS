@@ -31,6 +31,22 @@ python main-code/main.py --student 3
 python main-code/main.py --test
 ```
 
+## OS-level v1 launch
+
+- **Linux/AppArmor**
+  - Install profile: `bash code2/apparmor/install_apparmor_profile.sh`
+  - Launch: `bash sffs.sh` (auto-attempts AppArmor mode when available)
+- **Windows/Job Object**
+  - Launch: `sffs.bat` (routes through `code2/windows_job_wrapper.py`)
+
+To enforce secure mode manually:
+
+```bash
+python main-code/main.py --secure-required
+```
+
+If confinement markers are absent, startup fails closed.
+
 ## Architecture (brief)
 
 ```

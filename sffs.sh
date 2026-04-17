@@ -28,9 +28,25 @@ if [ ! -f ".deps_installed" ]; then
     echo "Dependencies installed."
 fi
 
+APPARMOR_PROFILE="sffs-main-code"
+if command -v aa-exec >/dev/null 2>&1; then
+    if aa-status --enabled >/dev/null 2>&1; then
+        export SFFS_OS_ISOLATION="apparmor"
+        RUN_PREFIX=(aa-exec -p "$APPARMOR_PROFILE")
+        SECURE_FLAG=(--secure-required)
+        echo "AppArmor secure mode requested with profile: $APPARMOR_PROFILE"
+    else
+        RUN_PREFIX=()
+        SECURE_FLAG=()
+    fi
+else
+    RUN_PREFIX=()
+    SECURE_FLAG=()
+fi
+
 if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
     echo "No display — headless mode"
-    "$PYTHON" main-code/main.py --headless "$@"
+    "${RUN_PREFIX[@]}" "$PYTHON" main-code/main.py "${SECURE_FLAG[@]}" --headless "$@"
 else
-    "$PYTHON" main-code/main.py "$@"
+    "${RUN_PREFIX[@]}" "$PYTHON" main-code/main.py "${SECURE_FLAG[@]}" "$@"
 fi

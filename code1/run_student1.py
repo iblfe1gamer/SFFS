@@ -63,8 +63,8 @@ def _menu() -> None:
             if not sffs.exists() or aes is None:
                 print("Run [2] first in this session to create sample.sffs and set the AES key.")
                 continue
-            dest = out / "restored.txt"
-            r = decryptFile(sffs, aes, dest)
+            # decryptFile expects an output directory, not a target filename.
+            r = decryptFile(sffs, aes, out)
             print("OK:", r.get("output_path"))
         elif choice == "4":
             h1 = generateHash(sample)

@@ -10,7 +10,7 @@ from f02_encrypt_file import encryptFile
 from f03_decrypt_file import SecurityError, decryptFile
 from f04_generate_hash import generateHash
 from f05_verify_hash import verifyHash
-from f06_secure_key_storage import retrieveKey, secureKeyStorage
+from f06_secure_key_storage import retrieveKey, secureKeyStorage, unwrapAESKey, wrapAESKey
 
 
 def test_key_pair_generation(tmp_path: Path) -> None:
@@ -86,3 +86,38 @@ def test_key_retrieval_fails_wrong_password(tmp_path: Path) -> None:
     ks = store["keystore_path"]
     with pytest.raises(ValueError):
         retrieveKey(ks, "wrong_pass")
+
+
+def test_keystore_pbkdf2_compatibility_mode(tmp_path: Path) -> None:
+    r = generateKeyPairs(tmp_path, key_size=2048)
+    store = secureKeyStorage(
+        r["private_key_bytes"],
+        "compat_pass",
+        tmp_path,
+        kdf="PBKDF2-SHA256",
+    )
+    ks = store["keystore_path"]
+    key = retrieveKey(ks, "compat_pass")
+    assert isinstance(key, bytes)
+    assert len(key) > 0
+
+
+def test_wrap_metadata_binds_to_expected_sffs(tmp_path: Path) -> None:
+    keypair = generateKeyPairs(tmp_path, key_size=2048)
+    store = secureKeyStorage(keypair["private_key_bytes"], "correct_pass", tmp_path)
+    keystore = store["keystore_path"]
+
+    aes_key = token_bytes(32)
+    sffs_ok = tmp_path / "ok.sffs"
+    sffs_ok.write_bytes(b"SFFS-bound-content")
+    wrapped = wrapAESKey(aes_key, keypair["public_key_path"], bound_file_path=sffs_ok)
+
+    # Bound path works.
+    out = unwrapAESKey(wrapped, keystore, "correct_pass", expected_sffs_path=sffs_ok)
+    assert out == aes_key
+
+    # Different target path is rejected by binding checks.
+    other = tmp_path / "other.sffs"
+    other.write_bytes(b"different")
+    with pytest.raises(ValueError):
+        unwrapAESKey(wrapped, keystore, "correct_pass", expected_sffs_path=other)

@@ -28,5 +28,5 @@ if not exist "%~dp0.deps_installed" (
 
 echo Starting SFFS...
 cd /d "%~dp0"
-"%PYTHON%" main-code\main.py %*
+"%PYTHON%" code2\windows_job_wrapper.py %*
 pause

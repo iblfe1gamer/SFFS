@@ -30,6 +30,15 @@ from f03_decrypt_file import SecurityError, decryptFile
 from f05_verify_hash import verifyHash
 from f06_secure_key_storage import unwrapAESKey
 
+_SEEN_NONCES: dict[str, int] = {}
+_NONCE_TTL_SECONDS = 30
+
+
+def _purge_old_nonces(now: int) -> None:
+    stale = [k for k, t in _SEEN_NONCES.items() if now - t > _NONCE_TTL_SECONDS]
+    for k in stale:
+        _SEEN_NONCES.pop(k, None)
+
 
 def _require_within(child: Path, parent: Path) -> None:
     child_r = child.resolve()
@@ -63,6 +72,10 @@ def _verify_envelope(envelope: dict) -> dict:
     now = int(time.time())
     if abs(now - int(issued_at)) > 30:
         raise PermissionError("Stale IPC envelope")
+    _purge_old_nonces(now)
+    if nonce in _SEEN_NONCES:
+        raise PermissionError("Replay IPC envelope nonce")
+    _SEEN_NONCES[nonce] = now
 
     msg = _canonical_json(
         {
@@ -113,7 +126,12 @@ def _action_decrypt(payload: dict) -> dict:
             raise FileNotFoundError(str(p))
 
     wrapped = wrap_path.read_bytes()
-    aes_key = unwrapAESKey(wrapped, keystore_path, master_password)
+    aes_key = unwrapAESKey(
+        wrapped,
+        keystore_path,
+        master_password,
+        expected_sffs_path=sffs_path,
+    )
     dec = decryptFile(sffs_path, aes_key, output_dir)
     vr = verifyHash(dec["hash_pre"], dec["hash_post"])
     if not vr.get("match"):

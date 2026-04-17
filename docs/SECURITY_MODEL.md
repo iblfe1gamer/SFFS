@@ -59,3 +59,24 @@ The following controls are pinned to automated tests in `tests/test_worker_harde
 | Worker output confinement | Non-sandbox output path rejected | `test_policy_guard_rejects_wrong_output_root` |
 | Worker action minimization | Non-whitelisted action rejected | `test_policy_guard_rejects_disallowed_action` |
 | Path traversal/escape guard | Child path outside parent rejected | `test_require_within_rejects_escape` |
+
+## 7. OS-level isolation v1
+
+SFFS now supports a concrete OS-enforced "v1" mode in launchers:
+
+- **Linux:** AppArmor profile `security/apparmor/sffs-main-code.apparmor` loaded as `sffs-main-code`, launcher uses `aa-exec -p sffs-main-code`.
+- **Windows:** Job Object wrapper `code2/windows_job_wrapper.py` with `KILL_ON_JOB_CLOSE` and active-process cap; launcher routes through wrapper.
+- Isolation sources are owned under `code2/` (Student 2 responsibility):
+  - `code2/os_isolation.py`
+  - `code2/windows_job_wrapper.py`
+  - `code2/apparmor/sffs-main-code.apparmor`
+
+Secure mode gate:
+
+- `main-code/main.py --secure-required` calls `os_isolation.ensure_secure_mode()`.
+- This gate fails closed when required confinement markers are missing.
+
+Notes:
+
+- Linux AppArmor is stronger confinement than app-only checks, but still requires correct host policy loading.
+- Windows Job Object provides kernel-managed process constraints; full filesystem MAC is not provided by Job Objects alone.

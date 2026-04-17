@@ -244,3 +244,25 @@ git commit -m "Checkpoint N complete"
 6. **Every function logs its execution** to `writeAuditLog()` via the shared logger
 7. **Each file is independently runnable** with an `if __name__ == "__main__":` demo block
 8. **Comments explain WHY, not WHAT** — the code shows what, comments show reasoning
+
+---
+
+## Post-build Hardening Plan (Current)
+
+### P1 — Secure mode and ownership
+- [x] Keep OS isolation controls under `code2/` (Student 2 ownership)
+- [x] Enforce secure launcher paths for Windows/Linux in release mode
+
+### P2 — Test and CI quality
+- [x] Add CI matrix for wrapper/isolation entrypoints
+- [x] Replace skipped cloud-sync encryption test with deterministic mocked test
+
+### P3 — `.aeswrap` hardening
+- [x] Bind `.aeswrap` metadata to target `.sffs` identity (name + hash)
+- [x] Add key commitment to wrapped-key envelope and verify on unwrap
+- [x] Fail fast on wrap metadata mismatch before decrypting payload
+- [x] Keep compatibility path for legacy raw wrapped-key blobs
+
+### P4 — Audit and resilience
+- [x] Introduce hash-chain linkage (`prev_hash`) in audit entries
+- [x] Add replay-cache for worker IPC nonces with TTL eviction

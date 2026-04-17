@@ -1,18 +1,131 @@
 """
-Read-only viewer for files decrypted into the sandbox (text or hex preview).
+Read-only viewer for files decrypted into the sandbox.
+
+Text-like files are previewed inline. Binary/media/document files are opened
+through the secure portable-app launcher so files stay inside SFFS policy.
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QDialog, QLabel, QTextEdit, QVBoxLayout
+from PyQt6.QtWidgets import QDialog, QLabel, QMessageBox, QTextEdit, QVBoxLayout
+
+_TEXT_SUFFIXES = {
+    ".txt",
+    ".md",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".ini",
+    ".cfg",
+    ".csv",
+    ".log",
+    ".xml",
+    ".py",
+    ".js",
+    ".ts",
+    ".html",
+    ".css",
+    ".sql",
+}
 
 
-def show_sandbox_file_viewer(parent, path: Path, max_bytes: int = 512_000) -> None:
-    """Show UTF-8 text or a hex preview for binary files."""
+def _decode_text_preview(data: bytes) -> str | None:
+    """Try decoding as common text encodings with a simple readability gate."""
+    for enc in ("utf-8", "utf-16", "latin-1"):
+        try:
+            text = data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+        if not text:
+            return text
+        printable = sum(ch.isprintable() or ch in "\r\n\t" for ch in text)
+        ratio = printable / len(text)
+        if ratio >= 0.9:
+            return text
+    return None
+
+
+def _audit(parent, event: str, severity: str, metadata: dict | None = None) -> None:
+    """Best-effort audit log hook through active core logger."""
+    core = getattr(parent, "_core", None)
+    logger = getattr(core, "logger", None) if core is not None else None
+    if logger is None:
+        return
+    try:
+        logger.log(
+            event,
+            severity,
+            module="sandbox_viewer",
+            user_id=getattr(core, "_user_id", None),
+            metadata=metadata or {},
+        )
+    except Exception:
+        pass
+
+
+def _launch_with_policy(parent, path: Path) -> bool:
+    """Launch non-text files via secure app policy in code2."""
+    try:
+        from secure_app_launcher import launch_sandbox_file
+    except Exception:
+        # Keep code3 standalone demos working by injecting code2 path on demand.
+        code2_root = Path(__file__).resolve().parent.parent / "code2"
+        if str(code2_root) not in sys.path:
+            sys.path.insert(0, str(code2_root))
+        from secure_app_launcher import launch_sandbox_file  # type: ignore
+
+    try:
+        res = launch_sandbox_file(path, wait=False)
+        core = getattr(parent, "_core", None)
+        if core is not None and hasattr(core, "register_external_viewer_pid"):
+            try:
+                core.register_external_viewer_pid(int(res.get("pid")))
+            except Exception:
+                pass
+        _audit(
+            parent,
+            "External viewer launched",
+            "INFO",
+            {"path": str(path), "app_id": res.get("app_id"), "pid": res.get("pid")},
+        )
+        return True
+    except Exception as e:
+        _audit(
+            parent,
+            "External viewer blocked",
+            "WARN",
+            {"path": str(path), "error": str(e)},
+        )
+        QMessageBox.warning(
+            parent,
+            "Open blocked",
+            f"Could not open file under secure app policy:\n{path}\n\n{e}",
+        )
+        return False
+
+
+def show_sandbox_file_viewer(parent, path: Path, max_bytes: int = 512_000) -> str:
+    """Show text preview inline, or launch secure external viewer for non-text.
+
+    Returns:
+        "inline" when shown in app, "external" when launched externally,
+        "error" when opening failed.
+    """
     path = Path(path)
+    if not path.exists():
+        QMessageBox.warning(parent, "File missing", f"Sandbox file not found:\n{path}")
+        return "error"
+
+    data = path.read_bytes()[:max_bytes]
+    looks_text = path.suffix.lower() in _TEXT_SUFFIXES
+    decoded = _decode_text_preview(data) if looks_text or data else None
+
+    if decoded is None and data:
+        return "external" if _launch_with_policy(parent, path) else "error"
+
     dlg = QDialog(parent)
     dlg.setWindowTitle(f"Sandbox: {path.name}")
     dlg.resize(720, 520)
@@ -21,15 +134,10 @@ def show_sandbox_file_viewer(parent, path: Path, max_bytes: int = 512_000) -> No
 
     te = QTextEdit()
     te.setReadOnly(True)
-    data = path.read_bytes()[:max_bytes]
-    try:
-        te.setPlainText(data.decode("utf-8"))
-    except UnicodeDecodeError:
-        hx = data[:16_384].hex()
-        te.setPlainText(
-            "(Binary - hex preview, first 16 KiB)\n\n" + " ".join(hx[i : i + 2] for i in range(0, len(hx), 2))
-        )
+    te.setPlainText(decoded or "")
     if path.stat().st_size > max_bytes:
         te.append(f"\n\n... truncated (file size {path.stat().st_size} bytes)")
     lay.addWidget(te)
     dlg.exec()
+    _audit(parent, "Inline sandbox preview", "INFO", {"path": str(path)})
+    return "inline"

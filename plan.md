@@ -266,3 +266,12 @@ git commit -m "Checkpoint N complete"
 ### P4 — Audit and resilience
 - [x] Introduce hash-chain linkage (`prev_hash`) in audit entries
 - [x] Add replay-cache for worker IPC nonces with TTL eviction
+
+### P5 — Portable USB viewer policy (in progress)
+- [x] Define USB trust-boundary directories: `apps/`, `sffs_data/sandbox/decrypted/`, `sffs_data/sandbox/temp/`
+- [x] Add portable app allowlist manifest for extension routing
+- [x] Implement secure external launcher (`code2`) with strict path-policy checks
+- [x] Integrate dashboard open-flow with allowlist-based external launcher
+- [x] Add cleanup policy (viewer temp/MRU/autosave controls + wipe on exit)
+- [x] Add emergency-lock termination for launched viewer processes
+- [x] Add tests for allow/deny launch paths, traversal blocks, and missing app handling

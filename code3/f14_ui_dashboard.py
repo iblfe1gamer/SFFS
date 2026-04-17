@@ -316,7 +316,11 @@ class SFSSDashboard(QMainWindow):
     def _open_sandbox_item(self, item: QListWidgetItem) -> None:
         from sandbox_viewer import show_sandbox_file_viewer
 
-        show_sandbox_file_viewer(self, Path(item.text()))
+        mode = show_sandbox_file_viewer(self, Path(item.text()))
+        if mode == "external":
+            self._status.setText(f"Opened with secure external viewer: {Path(item.text()).name}")
+        elif mode == "inline":
+            self._status.setText(f"Opened inline preview: {Path(item.text()).name}")
 
     def _pick_sffs_to_view(self) -> None:
         if not self._core:
@@ -330,9 +334,12 @@ class SFSSDashboard(QMainWindow):
 
         try:
             out = self._core.ensure_decrypted_for_view(Path(path))
-            show_sandbox_file_viewer(self, out)
+            mode = show_sandbox_file_viewer(self, out)
             self.refresh_sandbox_list()
-            self._status.setText(f"Opened in viewer: {out.name}")
+            if mode == "external":
+                self._status.setText(f"Opened with secure external viewer: {out.name}")
+            elif mode == "inline":
+                self._status.setText(f"Opened inline preview: {out.name}")
         except Exception as e:
             QMessageBox.warning(self, "View failed", str(e))
 

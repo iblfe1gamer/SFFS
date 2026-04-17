@@ -74,6 +74,8 @@ class SFFSCore:
         self._ipc_counter = 0
         self._workers_lock = threading.Lock()
         self._active_workers: dict[int, subprocess.Popen] = {}
+        self._viewers_lock = threading.Lock()
+        self._active_viewers: set[int] = set()
 
     @staticmethod
     def _wrap_ref_path(sffs_path: Path) -> Path:
@@ -127,6 +129,7 @@ class SFFSCore:
 
     def _on_threat_detected(self, threat_type: str, details: str) -> None:
         self._terminate_active_workers()
+        self._terminate_active_viewers()
         try:
             emergencyLock(
                 "DEBUGGER_DETECTED",
@@ -141,6 +144,7 @@ class SFFSCore:
 
     def _on_usb_removed(self, _reason: str = "USB_REMOVED") -> None:
         self._terminate_active_workers()
+        self._terminate_active_viewers()
         try:
             emergencyLock(
                 "USB_REMOVED",
@@ -177,6 +181,7 @@ class SFFSCore:
 
     def logout(self) -> None:
         self._terminate_active_workers()
+        self._terminate_active_viewers()
         if self.session_token and self._auth_db:
             try:
                 terminateSession(self.session_token, self._auth_db)
@@ -380,6 +385,33 @@ class SFFSCore:
                 except Exception:
                     pass
 
+    def register_external_viewer_pid(self, pid: int) -> None:
+        """Track external viewer process PID for emergency shutdown."""
+        if not isinstance(pid, int) or pid <= 0:
+            return
+        with self._viewers_lock:
+            self._active_viewers.add(pid)
+
+    def _terminate_active_viewers(self) -> None:
+        """Best-effort termination of all tracked external viewer processes."""
+        with self._viewers_lock:
+            pids = list(self._active_viewers)
+            self._active_viewers.clear()
+        for pid in pids:
+            try:
+                proc = subprocess.Popen(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                proc.wait(timeout=3)
+            except Exception:
+                # Fall back to os.kill for non-Windows or taskkill failures.
+                try:
+                    os.kill(pid, 15)
+                except Exception:
+                    pass
+
     def ensure_decrypted_for_view(self, sffs_path: Path) -> Path:
         """Decrypt if needed; reuse cached sandbox file when still present."""
         self._require_session()
@@ -422,6 +454,7 @@ class SFFSCore:
 
     def shutdown(self) -> None:
         self._terminate_active_workers()
+        self._terminate_active_viewers()
         if self.process_monitor:
             try:
                 self.process_monitor.stop()

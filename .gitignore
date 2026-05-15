@@ -1,0 +1,9 @@
+SFFS/.venv/
+SFFS/sffs_data/
+SFFS/security/
+*.pem
+*.key
+.env*
+__pycache__/
+*.pyc
+*.pyo

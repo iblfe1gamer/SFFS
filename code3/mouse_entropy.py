@@ -42,3 +42,22 @@ def session_random_bytes(n: int) -> bytes:
     while len(out) < n:
         out.extend(hashlib.sha256(bytes(out[-32:]) + extra + base).digest())
     return bytes(out[:n])
+
+
+_ENTROPY_TARGET = 256
+
+
+def get_entropy_pool_status() -> dict:
+    with _lock:
+        size = len(_pool)
+    return {
+        "bytes_collected": size,
+        "target": _ENTROPY_TARGET,
+        "percentage": min(100, int(size / _ENTROPY_TARGET * 100)),
+        "is_ready": size >= _ENTROPY_TARGET,
+    }
+
+
+def is_entropy_ready() -> bool:
+    with _lock:
+        return len(_pool) >= _ENTROPY_TARGET

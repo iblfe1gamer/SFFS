@@ -65,7 +65,7 @@ The following controls are pinned to automated tests in `tests/test_worker_harde
 SFFS now supports a concrete OS-enforced "v1" mode in launchers:
 
 - **Linux:** AppArmor profile `security/apparmor/sffs-main-code.apparmor` loaded as `sffs-main-code`, launcher uses `aa-exec -p sffs-main-code`.
-- **Windows:** Job Object wrapper `code2/windows_job_wrapper.py` with `KILL_ON_JOB_CLOSE` and active-process cap; launcher routes through wrapper.
+- **Windows:** Job Object wrapper `code2/windows_job_wrapper.py` with `KILL_ON_JOB_CLOSE` and active-process cap; `sffs.bat` routes `main.py` through that wrapper and sets `SFFS_OS_ISOLATION` / `SFFS_JOB_OBJECT_ACTIVE`. If you start `main.py` directly, `secure_app_launcher` calls `try_activate_job_for_current_process()` on first secure open so the **current** process is assigned to a job with the same limits (fails only if a parent process already holds this process in an incompatible job).
 - Isolation sources are owned under `code2/` (Student 2 responsibility):
   - `code2/os_isolation.py`
   - `code2/windows_job_wrapper.py`

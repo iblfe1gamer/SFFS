@@ -85,10 +85,21 @@ def _secure_mode_enforced(policy: dict[str, Any]) -> None:
     if not bool(policy.get("secure_mode_required", False)):
         return
     status = detect_isolation()
+    if status.get("active", False):
+        return
+    # Windows: allow launches when SFFS was not started via sffs.bat by assigning this
+    # process to a Job Object here (same limits as windows_job_wrapper.py).
+    if platform.system().lower() == "windows":
+        from windows_job_wrapper import try_activate_job_for_current_process
+
+        if try_activate_job_for_current_process():
+            return
     if not status.get("active", False):
         raise LauncherPolicyError(
             f"Secure launch requires active OS isolation: "
-            f"platform={status.get('platform')} mode={status.get('mode')} reason={status.get('reason')}"
+            f"platform={status.get('platform')} mode={status.get('mode')} reason={status.get('reason')}. "
+            f"Start with sffs.bat or ensure this process can be assigned to a Windows Job Object "
+            f"(some parent shells already confine the process in an incompatible job)."
         )
 
 

@@ -141,11 +141,8 @@ def emergencyLock(trigger: str, sandbox_path: Path = None, session_token: str = 
     except Exception as e:
         print(f"Step 6 failed (write log): {e}")
 
-    # Step 7: terminate process.
-    # For testability we keep MANUAL/TIMEOUT graceful; high-risk triggers force exit.
-    force_exit_triggers = {"USB_REMOVED", "DEBUGGER_DETECTED", "MAX_FAILURES"}
-    if trigger in force_exit_triggers:
-        raise SystemExit(0)
+    # Step 7: terminate process unconditionally — all triggers require hard exit.
+    raise SystemExit(0)
 
 
 def setupUSBRemovalDetection(usb_root: Path, lock_callback) -> threading.Thread:

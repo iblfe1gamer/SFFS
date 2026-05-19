@@ -11,6 +11,7 @@ it enforces strict path policy and performs decrypt+integrity verification.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import sys
 import os
@@ -45,6 +46,27 @@ def _require_within(child: Path, parent: Path) -> None:
     parent_r = parent.resolve()
     if parent_r != child_r and parent_r not in child_r.parents:
         raise PermissionError(f"Path policy violation: {child_r} is outside {parent_r}")
+
+
+_SYSTEM_PATHS = [
+    Path("C:\\Windows"),
+    Path("C:\\Program Files"),
+    Path("C:\\Program Files (x86)"),
+    Path("C:\\ProgramData"),
+    Path("/etc"),
+    Path("/usr"),
+    Path("/var"),
+    Path("/boot"),
+    Path("/sys"),
+    Path("/proc"),
+]
+
+
+def _require_not_system_path(path: Path) -> None:
+    p = path.resolve()
+    for sp in _SYSTEM_PATHS:
+        if sp.exists() and (p == sp or sp in p.parents):
+            raise PermissionError(f"Output path denied: {path} overlaps with system path")
 
 
 def _canonical_json(obj: dict) -> str:
@@ -101,10 +123,20 @@ def _load_policy() -> dict:
     return json.loads(p.read_text(encoding="utf-8"))
 
 
-def _policy_guard(action: str, output_dir: Path, sandbox_root: Path, policy: dict) -> None:
+def _policy_guard(
+    action: str,
+    output_dir: Path,
+    sandbox_root: Path | None,
+    policy: dict,
+    is_external_output: bool = False,
+) -> None:
     allowed_actions = policy.get("allowed_actions", [])
     if action not in allowed_actions:
         raise PermissionError(f"Action '{action}' denied by policy")
+    if is_external_output:
+        _require_not_system_path(output_dir)
+        return
+    assert sandbox_root is not None
     allowed_rel = policy.get("output_root_relative", "decrypted")
     expected = (sandbox_root / allowed_rel).resolve()
     if output_dir.resolve() != expected:
@@ -113,19 +145,21 @@ def _policy_guard(action: str, output_dir: Path, sandbox_root: Path, policy: dic
 
 def _action_decrypt(payload: dict) -> dict:
     sffs_path = Path(payload["sffs_path"]).resolve()
-    wrap_path = Path(payload["wrap_path"]).resolve()
     keystore_path = Path(payload["keystore_path"]).resolve()
     output_dir = Path(payload["output_dir"]).resolve()
-    sandbox_root = Path(payload["sandbox_root"]).resolve()
+    is_external_output = payload.get("is_external_output", False)
     master_password = payload["master_password"]
+    wrapped = base64.b64decode(payload["wrap_data_b64"])
 
-    # Policy: output must remain under sandbox; input artifacts must exist.
-    _require_within(output_dir, sandbox_root)
-    for p in (sffs_path, wrap_path, keystore_path):
+    if is_external_output:
+        _require_not_system_path(output_dir)
+    else:
+        sandbox_root = Path(payload["sandbox_root"]).resolve()
+        _require_within(output_dir, sandbox_root)
+    for p in (sffs_path, keystore_path):
         if not p.exists():
             raise FileNotFoundError(str(p))
 
-    wrapped = wrap_path.read_bytes()
     aes_key = unwrapAESKey(
         wrapped,
         keystore_path,
@@ -158,11 +192,14 @@ def main() -> int:
         payload = _verify_envelope(envelope)
         policy = _load_policy()
         if args.action == "decrypt":
+            _is_external = payload.get("is_external_output", False)
+            _sr = payload.get("sandbox_root", "")
             _policy_guard(
                 action="decrypt",
                 output_dir=Path(payload["output_dir"]),
-                sandbox_root=Path(payload["sandbox_root"]),
+                sandbox_root=Path(_sr) if _sr else None,
                 policy=policy,
+                is_external_output=_is_external,
             )
             out = _action_decrypt(payload)
         else:

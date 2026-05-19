@@ -1,29 +1,48 @@
-# CLAUDE.md
+# SFFS — Smart File Fortify System
 
-This file provides guidance to Claude Code (claude.ai/code) when working with this repository.
+## Build & run
+```bash
+pip install -r requirements.txt        # install deps (delegates to main-code/requirements.txt)
+python main-code/main.py               # GUI — login + dashboard
+python main-code/main.py --headless    # CLI demo pipeline (no GUI)
+python main-code/main.py --student 1   # student runner (1, 2, or 3)
+pytest tests -q                        # run full test suite
+python sffs_usb_setup.py --verify      # verify USB portable install
+```
 
-## Overview
+## Stack
+- Language: Python 3.11
+- GUI: PyQt6 6.6+
+- Crypto: pycryptodome 3.19+, cryptography 41+
+- Auth: argon2-cffi 23.1+
+- Monitoring: psutil 5.9+
+- Cloud: google-api-python-client (Google Drive sync)
+- Platform: Windows primary; Linux CI (ubuntu-latest + xvfb for GUI tests)
 
-This directory contains office document files and is used for storing documents. It is not a software development project.
+## Architecture
+```
+code1/       # Student 1 — crypto: key gen, encrypt, decrypt, hash, secure key storage (f01–f06)
+code2/       # Student 2 — security: sandbox, memory wipe, auth, process monitor, audit log, emergency lock (f07–f12)
+code3/       # Student 3 — UI/cloud: drive detection, PyQt6 dashboard, file manager, cloud sync, config, threads (f13–f18)
+main-code/   # Integration: main.py (entry point), sffs_core.py, isolated_worker.py
+tests/       # pytest suite — per-student tests + integration + policy + hardening
+apps/        # bundled portable apps (7zip, imageglass)
+scripts/     # setup/verify utilities
+sffs_data/   # RUNTIME DATA — never commit, never overwrite manually
+security/    # security configs — treat as sensitive
+```
 
-## Available Files
+## Critical rules
+- Run `pytest tests -q` after editing any code file
+- Never commit directly to main — branch + PR always
+- Conventional commits: feat/fix/chore/docs/refactor
+- Never hardcode secrets or keys — use env vars or code1/f06_secure_key_storage.py
+- Each student owns their module: code1 = Student 1, code2 = Student 2, code3 = Student 3
+- OS isolation markers required for `--secure-required` mode (AppArmor/Linux, Windows Job Objects/Windows)
+- Block writes to: sffs_data/, security/, .env*, .pem, .key files
 
-The repository contains the following documents:
-
-- **Student scaffolding documents**: p00_scaffold.md, p01_student1.md, p02_student2.md, p03_student3.md
-- **Integration documentation**: p04_main_integration.md, p05_runners.md, p06_docs.md, p07_usb_install.md
-- **Data files**: GP1 series documents (Word, PDF, PowerPoint formats)
-- **Function breakdown**: SFFS_Functions_Breakdown.docx
-
-## Development Notes
-
-This is a document storage directory with no build system, test suite, or development tooling. All work involves reading and managing document files.
-
-When processing documents, consider:
-- Document files may contain text, data, or instructions relevant to the project context
-- Markdown files (.md) can be read directly to understand project scaffolding and requirements
-- Office document files (.doc, .docx, .pdf, .pptx) can be processed to extract content as needed
-
-## Commands
-
-No software development commands are available. Use standard file operations (Read, Write, Edit) to work with document files.
+## CI
+- `.github/workflows/tests.yml` — full pytest + USB verify + secure-mode fail-closed test
+- `.github/workflows/release-gate.yml` — release gating
+- GUI tests run under xvfb (continue-on-error: true)
+- Windows wrapper tests run on windows-latest

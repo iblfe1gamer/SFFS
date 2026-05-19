@@ -19,6 +19,7 @@ SHUTDOWN: emergencyLock or graceful logout → destroySandbox → terminateSessi
 
 from __future__ import annotations
 
+import base64
 import secrets
 import threading
 import zipfile
@@ -36,7 +37,8 @@ from f01_generate_key_pairs import generateKeyPairs
 from f02_encrypt_file import encryptFile
 from f03_decrypt_file import SecurityError
 from f04_generate_hash import generateHash
-from f06_secure_key_storage import secureKeyStorage, wrapAESKey
+from f06_secure_key_storage import secureKeyStorage, wrapAESKey, verifyKeystorePassword
+from wrap_store import WrapStore
 from f07_create_isolated_sandbox import createIsolatedSandbox, destroySandbox
 from f09_authenticate_user import authenticateUser, initAuthDatabase, terminateSession
 from f10_monitor_process import ProcessMonitor
@@ -76,30 +78,32 @@ class SFFSCore:
         self._active_workers: dict[int, subprocess.Popen] = {}
         self._viewers_lock = threading.Lock()
         self._active_viewers: set[int] = set()
+        self._wrap_store: Optional[WrapStore] = None
+        self._entropy_mode: str = "silent"
 
-    @staticmethod
-    def _wrap_ref_path(sffs_path: Path) -> Path:
-        return sffs_path.parent / f"{sffs_path.stem}.wrapref"
+    def _derive_wrap_key(self, password: str) -> bytes:
+        """Derive 32-byte AES key for WrapStore from session password + stored salt."""
+        assert self.paths
+        salt_path = self.paths["keys_dir"] / "wrap_store.salt"
+        if not salt_path.exists():
+            from Crypto.Random import get_random_bytes as _grb
+            salt_path.write_bytes(_grb(16))
+        salt = salt_path.read_bytes()
+        from argon2.low_level import Type, hash_secret_raw
+        return hash_secret_raw(
+            secret=password.encode("utf-8"),
+            salt=salt,
+            time_cost=3,
+            memory_cost=65536,
+            parallelism=4,
+            hash_len=32,
+            type=Type.ID,
+        )
 
-    def _resolve_wrap_path(self, sffs_path: Path) -> Path:
-        """
-        Resolve wrap file path with backward compatibility:
-        1) .wrapref pointer file (new opaque naming)
-        2) legacy <stem>.aeswrap sidecar
-        """
-        ref_path = self._wrap_ref_path(sffs_path)
-        if ref_path.exists():
-            try:
-                ref = json.loads(ref_path.read_text(encoding="utf-8"))
-                wrap_name = ref.get("wrap_file")
-                if isinstance(wrap_name, str) and wrap_name:
-                    candidate = (sffs_path.parent / wrap_name).resolve()
-                    # keep wrap constrained to the same directory
-                    if candidate.parent == sffs_path.parent.resolve() and candidate.exists():
-                        return candidate
-            except Exception:
-                pass
-        return sffs_path.parent / f"{sffs_path.stem}.aeswrap"
+    def set_entropy_mode(self, mode: str) -> None:
+        if mode not in ("silent", "interactive"):
+            raise ValueError("Mode must be 'silent' or 'interactive'")
+        self._entropy_mode = mode
 
     def initialize(self) -> dict:
         self.paths = initDriveDetection()
@@ -169,6 +173,10 @@ class SFFSCore:
             sid = (self.session_token or secrets.token_hex(8))[:16]
             self.sandbox = createIsolatedSandbox(self.paths["sandbox_dir"], session_id=sid)
             self._decrypt_cache.clear()
+            wrap_key = self._derive_wrap_key(self._session_password.decode("utf-8"))
+            wrap_db_path = self.paths["keys_dir"] / "wrap_store.db"
+            self._wrap_store = WrapStore(wrap_db_path, wrap_key)
+            self._wrap_store.initialize()
             if self.logger:
                 self.logger.log(
                     "User login",
@@ -195,6 +203,7 @@ class SFFSCore:
         if self._session_password is not None:
             secureMemoryWipe(self._session_password)
             self._session_password = None
+        self._wrap_store = None
         self._decrypt_cache.clear()
         if self.logger:
             self.logger.log("User logout", "INFO", module="SFFSCore", user_id=self._user_id)
@@ -220,6 +229,16 @@ class SFFSCore:
             g = generateKeyPairs(keys_dir, key_size=2048)
             secureKeyStorage(g["private_key_bytes"], master_password, keys_dir)
             pub = g["public_key_path"]
+        else:
+            ks = next(keys_dir.glob("keystore_*.json"), None)
+            if ks:
+                vr = verifyKeystorePassword(ks, master_password)
+                if not vr["valid"]:
+                    raise RuntimeError(
+                        "Keystore was created with a different password. "
+                        "Please log in with the original password used when "
+                        "you first encrypted a file."
+                    )
         return pub
 
     def encryptFileOperation(self, input_path: Path, master_password: str | None = None) -> dict:
@@ -229,26 +248,16 @@ class SFFSCore:
             master_password = self._master_password_str()
         input_path = Path(input_path)
         pub = self._ensure_rsa_keys(master_password)
+        if self._entropy_mode == "interactive":
+            from mouse_entropy import is_entropy_ready
+            if not is_entropy_ready():
+                raise RuntimeError("INSUFFICIENT_ENTROPY")
         aes_key = session_random_bytes(32)
         out_sffs = input_path.with_suffix(".sffs")
         enc = encryptFile(input_path, aes_key, out_sffs)
         wrapped = wrapAESKey(aes_key, pub, bound_file_path=out_sffs)
-        # Opaque/random wrap filename to reduce metadata correlation.
-        wrap_name = f"{secrets.token_hex(16)}.aeswrap"
-        wrap_path = out_sffs.parent / wrap_name
-        wrap_path.write_bytes(wrapped)
-        ref_path = self._wrap_ref_path(out_sffs)
-        ref_path.write_text(
-            json.dumps(
-                {
-                    "version": "1.0",
-                    "sffs_file": out_sffs.name,
-                    "wrap_file": wrap_name,
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+        assert self._wrap_store is not None, "WrapStore not initialized — login required"
+        self._wrap_store.store(out_sffs, wrapped, self._user_id)
         h = generateHash(input_path)
         if self.logger:
             self.logger.log(
@@ -261,39 +270,55 @@ class SFFSCore:
         return {
             "sffs_path": out_sffs,
             "hash_pre": enc.get("hash_pre", h),
-            "wrap_path": wrap_path,
             "status": "encrypted",
         }
 
-    def decryptFileOperation(self, sffs_path: Path, master_password: str | None = None) -> dict:
+    def decryptFileOperation(
+        self,
+        sffs_path: Path,
+        master_password: str | None = None,
+        output_path: Path | None = None,
+    ) -> dict:
         self._require_session()
         assert self.paths and self.sandbox and self.logger
         if master_password is None:
             master_password = self._master_password_str()
         sffs_path = Path(sffs_path)
-        wrap_path = self._resolve_wrap_path(sffs_path)
-        if not wrap_path.exists():
-            raise FileNotFoundError(f"Missing AES wrap file: {wrap_path}")
+        if output_path is not None:
+            output_path = Path(output_path)
+            if output_path.exists():
+                raise FileExistsError(f"Output path already exists: {output_path}")
+            output_dir = output_path.parent
+            output_dir.mkdir(parents=True, exist_ok=True)
+            sandbox_root = None
+        else:
+            output_dir = Path(self.sandbox["decrypted_dir"])
+            sandbox_root = Path(self.sandbox["sandbox_path"])
+        assert self._wrap_store is not None, "WrapStore not initialized — login required"
+        wrap_data = self._wrap_store.lookup(sffs_path)
         ks = next(self.paths["keys_dir"].glob("keystore_*.json"), None)
         if ks is None:
             raise FileNotFoundError("No keystore in keys_dir")
         dec = self._decrypt_via_worker(
             sffs_path=sffs_path,
-            wrap_path=wrap_path,
+            wrap_data=wrap_data,
             keystore_path=ks,
-            output_dir=Path(self.sandbox["decrypted_dir"]),
-            sandbox_root=Path(self.sandbox["sandbox_path"]),
+            output_dir=output_dir,
+            sandbox_root=sandbox_root,
             master_password=master_password,
         )
+        out = Path(dec["output_path"])
+        if output_path is not None and out != output_path:
+            out.rename(output_path)
+            out = output_path
         if self.logger:
             self.logger.log(
                 f"Decrypt {sffs_path.name}",
                 "INFO",
                 module="SFFSCore",
                 user_id=self._user_id,
-                metadata={"out": str(dec["output_path"]), "via_worker": True},
+                metadata={"out": str(out), "via_worker": True},
             )
-        out = Path(dec["output_path"])
         self._decrypt_cache[str(sffs_path.resolve())] = out
         return {
             "output_path": out,
@@ -305,18 +330,20 @@ class SFFSCore:
         self,
         *,
         sffs_path: Path,
-        wrap_path: Path,
+        wrap_data: bytes,
         keystore_path: Path,
         output_dir: Path,
-        sandbox_root: Path,
+        sandbox_root: Path | None,
         master_password: str,
     ) -> dict:
+        is_external = sandbox_root is None
         payload = {
             "sffs_path": str(sffs_path),
-            "wrap_path": str(wrap_path),
+            "wrap_data_b64": base64.b64encode(wrap_data).decode("ascii"),
             "keystore_path": str(keystore_path),
             "output_dir": str(output_dir),
-            "sandbox_root": str(sandbox_root),
+            "sandbox_root": str(sandbox_root) if sandbox_root else "",
+            "is_external_output": is_external,
             "master_password": master_password,
         }
         envelope = self._sign_worker_payload(payload)

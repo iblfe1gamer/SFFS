@@ -73,7 +73,7 @@ from argon2.low_level import Type, hash_secret_raw
 KDF_ITERATIONS = 310_000  # PBKDF2 fallback compatibility
 ARGON2_TIME_COST = 3
 ARGON2_MEMORY_COST = 65536  # KiB
-ARGON2_PARALLELISM = 2
+ARGON2_PARALLELISM = 4
 
 
 def secureKeyStorage(
@@ -244,6 +244,44 @@ def retrieveKey(keystore_path: Path, master_password: str) -> bytes:
     private_key_bytes = cipher.decrypt_and_verify(encrypted_key, auth_tag)
 
     return private_key_bytes
+
+
+def verifyKeystorePassword(keystore_path: Path, password: str) -> dict:
+    """Check if password can unlock keystore without exposing the key."""
+    if not keystore_path.exists():
+        return {"valid": False, "reason": f"Keystore not found: {keystore_path}"}
+    try:
+        keystore_data = json.loads(keystore_path.read_text())
+        salt = base64.b64decode(keystore_data["salt"])
+        kdf_name = (keystore_data.get("kdf") or "PBKDF2-SHA256").upper()
+        if kdf_name == "ARGON2ID":
+            derived_key = hash_secret_raw(
+                secret=password.encode("utf-8"),
+                salt=salt,
+                time_cost=int(keystore_data.get("argon2_time_cost", ARGON2_TIME_COST)),
+                memory_cost=int(keystore_data.get("argon2_memory_cost", ARGON2_MEMORY_COST)),
+                parallelism=int(keystore_data.get("argon2_parallelism", ARGON2_PARALLELISM)),
+                hash_len=32,
+                type=Type.ID,
+            )
+        else:
+            derived_key = PBKDF2(
+                password,
+                salt,
+                dkLen=32,
+                count=int(keystore_data.get("kdf_iterations", KDF_ITERATIONS)),
+                hmac_hash_module=SHA256,
+            )
+        encrypted_key = base64.b64decode(keystore_data["encrypted_private_key"])
+        auth_tag = base64.b64decode(keystore_data["auth_tag"])
+        iv = base64.b64decode(keystore_data["iv"])
+        cipher = AES.new(derived_key, AES.MODE_GCM, nonce=iv)
+        cipher.decrypt_and_verify(encrypted_key, auth_tag)
+        return {"valid": True}
+    except (ValueError, KeyError):
+        return {"valid": False, "reason": "MAC check failed — wrong password or corrupted keystore"}
+    except Exception as e:
+        return {"valid": False, "reason": f"Keystore check error: {type(e).__name__}"}
 
 
 def wrapAESKey(aes_key: bytes, public_key_path: Path, bound_file_path: Optional[Path] = None) -> bytes:

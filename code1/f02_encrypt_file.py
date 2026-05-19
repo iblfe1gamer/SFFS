@@ -94,18 +94,13 @@ def encryptFile(
             f"Received {len(aes_key)} bytes."
         )
 
-    # Validate input file exists
-    if not input_path.exists():
-        raise FileNotFoundError(f"Input file not found: {input_path}")
-
-    # Read original file content (as bytes)
+    # Read original file content (as bytes); raises FileNotFoundError if missing
     plaintext = input_path.read_bytes()
     original_size = len(plaintext)
 
-    # Compute SHA-256 hash BEFORE encryption
-    # Why: We need to hash the plaintext, not the ciphertext
-    # The hash proves what the original content was
-    hash_pre = hashlib.sha256(plaintext).hexdigest()
+    # Compute SHA-256 hash BEFORE encryption — single call, reused as both hex string and raw digest
+    hash_digest = hashlib.sha256(plaintext).digest()
+    hash_pre = hash_digest.hex()
 
     # Generate cryptographically secure random IV (16 bytes = 128 bits)
     # Why: Each encryption must use a unique IV
@@ -133,7 +128,7 @@ def encryptFile(
         struct.pack("B", SFFS_VERSION) +  # Version byte
         iv +                   # IV (16 bytes)
         auth_tag +             # Auth tag (16 bytes)
-        hashlib.sha256(plaintext).digest() +  # Hash of plaintext (32 bytes)
+        hash_digest +                             # Hash of plaintext (32 bytes)
         struct.pack("Q", original_size)  # File size as uint64 little-endian
     )
 

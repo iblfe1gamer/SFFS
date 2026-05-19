@@ -208,7 +208,7 @@ class SFSSDashboard(QMainWindow):
         hv.addWidget(sub)
         header.addLayout(hv)
         header.addStretch()
-        user = QLabel(f"Signed in | session {session_token[:10]}...")
+        user = QLabel("Signed in")
         user.setObjectName("hintLabel")
         header.addWidget(user)
         self._lock_btn = QPushButton("End session")

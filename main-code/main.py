@@ -97,15 +97,17 @@ def run_headless_demo() -> None:
 
 
 def run_full_app() -> int:
-    from PyQt6.QtCore import QEvent, QObject
+    from PyQt6.QtCore import QEvent, QObject, Qt, QTimer
     from PyQt6.QtWidgets import (
         QApplication,
         QDialog,
+        QFileDialog,
         QFormLayout,
         QHBoxLayout,
         QLabel,
         QLineEdit,
         QMessageBox,
+        QProgressBar,
         QPushButton,
         QVBoxLayout,
     )
@@ -212,30 +214,114 @@ def run_full_app() -> int:
     )
     win.setWindowTitle("SFFS")
 
+    _entropy_state = {"mode": "silent"}
+
+    def show_entropy_dialog() -> bool:
+        from mouse_entropy import get_entropy_pool_status
+        dlg = QDialog(win)
+        dlg.setWindowTitle("Collecting Entropy")
+        dlg.setModal(True)
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel(
+            "Move your mouse randomly over this window\n"
+            "to generate encryption entropy."
+        ))
+        bar = QProgressBar()
+        bar.setRange(0, 100)
+        lay.addWidget(bar)
+        status_label = QLabel("0%")
+        status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(status_label)
+        timer = QTimer()
+
+        def _update() -> None:
+            s = get_entropy_pool_status()
+            bar.setValue(s["percentage"])
+            status_label.setText(f"{s['percentage']}%")
+            if s["is_ready"]:
+                timer.stop()
+                dlg.accept()
+
+        timer.timeout.connect(_update)
+        timer.start(100)
+        result = dlg.exec()
+        timer.stop()
+        return result == int(QDialog.DialogCode.Accepted)
+
     def do_encrypt() -> None:
         fp = win._selected_file
         if not fp:
             QMessageBox.information(win, "SFFS", "Select a file via drag-and-drop first.")
             return
+        if _entropy_state["mode"] == "interactive":
+            if not show_entropy_dialog():
+                return
         try:
             out = core.encryptFileOperation(Path(fp))
             win._status.setText(f"Encrypted: {out['sffs_path'].name}")
             win.refresh_sandbox_list()
+        except RuntimeError as e:
+            if "INSUFFICIENT_ENTROPY" in str(e):
+                QMessageBox.warning(
+                    win,
+                    "Entropy Required",
+                    "Please move your mouse randomly over the window before encrypting.",
+                )
+            else:
+                QMessageBox.warning(win, "Encrypt failed", str(e))
         except Exception as e:
             QMessageBox.warning(win, "Encrypt failed", str(e))
 
     def do_decrypt() -> None:
-        from PyQt6.QtWidgets import QFileDialog
-
         path, _ = QFileDialog.getOpenFileName(win, "Open .sffs", "", "SFFS (*.sffs)")
         if not path:
             return
-        try:
-            out = core.decryptFileOperation(Path(path))
-            win._status.setText(f"Decrypted to sandbox: {out['output_path'].name}")
-            win.refresh_sandbox_list()
-        except Exception as e:
-            QMessageBox.warning(win, "Decrypt failed", str(e))
+
+        msg = QMessageBox(win)
+        msg.setWindowTitle("Decrypt Location")
+        msg.setText(
+            "Where should the decrypted file be saved?\n\n"
+            "  Sandbox — Temporary, auto-wiped on logout\n"
+            "  Disk — Permanent, stays until you delete it"
+        )
+        sandbox_btn = msg.addButton("Sandbox", QMessageBox.ButtonRole.AcceptRole)
+        disk_btn = msg.addButton("Disk…", QMessageBox.ButtonRole.ActionRole)
+        msg.addButton(QMessageBox.StandardButton.Cancel)
+        msg.setDefaultButton(sandbox_btn)
+        msg.exec()
+        clicked = msg.clickedButton()
+
+        if clicked == disk_btn:
+            warn = QMessageBox.warning(
+                win,
+                "Security Warning",
+                "This file will be decrypted to your chosen location on disk.\n"
+                "It will NOT be placed in the sandbox and will NOT be\n"
+                "automatically wiped when you end your session.\n\n"
+                "The decrypted file will remain on disk until you delete it.",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            )
+            if warn == QMessageBox.StandardButton.Cancel:
+                return
+            save_path, _ = QFileDialog.getSaveFileName(
+                win,
+                "Save Decrypted File",
+                Path(path).stem,
+            )
+            if not save_path:
+                return
+            try:
+                out = core.decryptFileOperation(Path(path), output_path=Path(save_path))
+                win._status.setText(f"Decrypted to: {out['output_path']}")
+            except Exception as e:
+                QMessageBox.warning(win, "Decrypt failed", str(e))
+        elif clicked == sandbox_btn:
+            try:
+                out = core.decryptFileOperation(Path(path))
+                win._status.setText(f"Decrypted to sandbox: {out['output_path'].name}")
+                win.refresh_sandbox_list()
+            except Exception as e:
+                QMessageBox.warning(win, "Decrypt failed", str(e))
 
     win._enc.clicked.connect(do_encrypt)
     win._dec.clicked.connect(do_decrypt)

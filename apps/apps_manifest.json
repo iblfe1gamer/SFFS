@@ -65,7 +65,7 @@
   },
   "apps": {
     "libreoffice": {
-      "exe_rel": "apps/libreoffice/soffice.exe",
+      "exe_rel": "apps/LibreOfficePortable/App/libreoffice/program/soffice.exe",
       "args": [
         "--nologo",
         "--norestore",
@@ -73,7 +73,7 @@
       ]
     },
     "sumatrapdf": {
-      "exe_rel": "apps/sumatrapdf/SumatraPDF.exe",
+      "exe_rel": "apps/SumatraPDF-3.6-64/SumatraPDF-3.6-64.exe",
       "args": [
         "-reuse-instance"
       ]
@@ -83,13 +83,13 @@
       "args": []
     },
     "vlc": {
-      "exe_rel": "apps/vlc/vlc.exe",
+      "exe_rel": "apps/vlc-3.0.23/vlc.exe",
       "args": [
         "--play-and-exit"
       ]
     },
     "notepadpp": {
-      "exe_rel": "apps/notepadpp/notepad++.exe",
+      "exe_rel": "apps/npp.8.9.3.portable/notepad++.exe",
       "args": []
     },
     "7zip": {

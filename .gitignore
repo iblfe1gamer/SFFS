@@ -42,3 +42,7 @@ GP1*.doc
 GP1*.docx
 GP1*.pdf
 GP1*.pptx
+
+# Third-party portable viewers (populate with scripts/fetch_missing_viewers.ps1)
+apps/7zip/
+apps/imageglass/

@@ -7,3 +7,6 @@ SFFS/security/
 __pycache__/
 *.pyc
 *.pyo
+
+.claude/
+.obsidian/

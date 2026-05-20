@@ -1,12 +1,32 @@
+# Env & caches
 SFFS/.venv/
 SFFS/sffs_data/
-SFFS/security/
-*.pem
-*.key
-.env*
+SFFS/graphify-out/
+SFFS/.pytest_cache/
+SFFS/.agenthub/
+SFFS/.claude/
 __pycache__/
 *.pyc
 *.pyo
 
+# Sensitive
+SFFS/security/
+*.pem
+*.key
+.env*
+
+# Claude / Obsidian internals
 .claude/
 .obsidian/
+.agenthub/
+
+# Root-level junk (not part of SFFS project)
+SFFS_audit_report.csv
+SFFS_Functions_Breakdown.docx
+claude_code_skills_plan.md
+phase3_4_results.md
+graphify-out/
+
+# OS
+Thumbs.db
+.DS_Store

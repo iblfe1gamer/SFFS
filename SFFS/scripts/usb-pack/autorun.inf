@@ -1,0 +1,5 @@
+[AutoRun]
+open=SFFS_launcher.exe
+action=Run SFFS - Smart File Fortify System
+icon=SFFS_launcher.exe,0
+label=SFFS - Secure File Fortify System

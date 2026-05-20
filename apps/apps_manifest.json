@@ -1,0 +1,100 @@
+{
+  "manifest_version": "1.0",
+  "policy": {
+    "apps_root": "apps",
+    "allowed_open_root": "sffs_data/sandbox/decrypted",
+    "working_dir": "sffs_data/sandbox/temp",
+    "secure_mode_required": true
+  },
+  "routes": {
+    ".doc": "libreoffice",
+    ".docx": "libreoffice",
+    ".odt": "libreoffice",
+    ".rtf": "libreoffice",
+    ".xls": "libreoffice",
+    ".xlsx": "libreoffice",
+    ".ods": "libreoffice",
+    ".csv": "libreoffice",
+    ".ppt": "libreoffice",
+    ".pptx": "libreoffice",
+    ".odp": "libreoffice",
+    ".pdf": "sumatrapdf",
+    ".txt": "notepadpp",
+    ".md": "notepadpp",
+    ".json": "notepadpp",
+    ".xml": "notepadpp",
+    ".yaml": "notepadpp",
+    ".yml": "notepadpp",
+    ".ini": "notepadpp",
+    ".log": "notepadpp",
+    ".py": "notepadpp",
+    ".js": "notepadpp",
+    ".ts": "notepadpp",
+    ".html": "notepadpp",
+    ".css": "notepadpp",
+    ".sql": "notepadpp",
+    ".jpg": "imageglass",
+    ".jpeg": "imageglass",
+    ".png": "imageglass",
+    ".gif": "imageglass",
+    ".bmp": "imageglass",
+    ".webp": "imageglass",
+    ".tif": "imageglass",
+    ".tiff": "imageglass",
+    ".svg": "imageglass",
+    ".ico": "imageglass",
+    ".mp4": "vlc",
+    ".mkv": "vlc",
+    ".avi": "vlc",
+    ".mov": "vlc",
+    ".wmv": "vlc",
+    ".webm": "vlc",
+    ".m4v": "vlc",
+    ".mp3": "vlc",
+    ".wav": "vlc",
+    ".flac": "vlc",
+    ".aac": "vlc",
+    ".ogg": "vlc",
+    ".m4a": "vlc",
+    ".zip": "7zip",
+    ".7z": "7zip",
+    ".rar": "7zip",
+    ".tar": "7zip",
+    ".gz": "7zip",
+    ".bz2": "7zip"
+  },
+  "apps": {
+    "libreoffice": {
+      "exe_rel": "apps/LibreOfficePortable/App/libreoffice/program/soffice.exe",
+      "args": [
+        "--nologo",
+        "--norestore",
+        "--view"
+      ]
+    },
+    "sumatrapdf": {
+      "exe_rel": "apps/SumatraPDF-3.6-64/SumatraPDF-3.6-64.exe",
+      "args": [
+        "-reuse-instance"
+      ]
+    },
+    "imageglass": {
+      "exe_rel": "apps/imageglass/ImageGlass.exe",
+      "args": []
+    },
+    "vlc": {
+      "exe_rel": "apps/vlc-3.0.23/vlc.exe",
+      "args": [
+        "--play-and-exit"
+      ]
+    },
+    "notepadpp": {
+      "exe_rel": "apps/npp.8.9.3.portable/notepad++.exe",
+      "args": []
+    },
+    "7zip": {
+      "exe_rel": "apps/7zip/7zFM.exe",
+      "args": []
+    }
+  }
+}

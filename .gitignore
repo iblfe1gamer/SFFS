@@ -25,7 +25,10 @@ SFFS_audit_report.csv
 SFFS_Functions_Breakdown.docx
 claude_code_skills_plan.md
 phase3_4_results.md
-graphify-out/
+
+# Graphify: keep output, skip cache
+graphify-out/cache/
+SFFS/graphify-out/cache/
 
 # OS
 Thumbs.db

@@ -46,7 +46,12 @@ def _decrypt_blob(wrapper: dict, key: bytes) -> bytes:
 
 
 def _sha256_file(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    """Stream file in 8 MB chunks — safe for multi-GB .sffs files."""
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(8 * 1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 class _DbContext:

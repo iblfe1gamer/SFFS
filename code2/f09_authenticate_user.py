@@ -51,6 +51,13 @@ except ImportError:
 # Import secureMemoryWipe from sibling module
 from f08_secure_memory_wipe import secureMemoryWipe
 
+# Pre-computed dummy hash for constant-time rejection of unknown usernames.
+# Without this, unknown users return instantly while known users wait ~100ms
+# for Argon2 verify — attacker can enumerate valid usernames via timing.
+_DUMMY_HASH: str = PasswordHasher(
+    time_cost=3, memory_cost=65536, parallelism=4
+).hash("sffs_dummy_constant_xK9#mQ2_not_a_real_password")
+
 
 def _compute_lock_until(failed_attempts: int) -> str | None:
     """Return lock-until timestamp for current failed attempts."""
@@ -186,8 +193,14 @@ def authenticateUser(username: str, password: bytearray, db_path: Path) -> dict:
         )
         row = cursor.fetchone()
 
-        # Unknown user: return generic failure without leaking user existence.
+        # Unknown user: run dummy Argon2 verify to equalize response time.
+        # Without this, unknown users return instantly (~0ms) vs known users
+        # (~100ms for Argon2). Attacker can enumerate valid usernames via timing.
         if not row:
+            try:
+                pw.verify(_DUMMY_HASH, password.decode("utf-8", errors="replace"))
+            except Exception:
+                pass  # always fails — only here for timing equalization
             secureMemoryWipe(password)
             return {
                 "authenticated": False,

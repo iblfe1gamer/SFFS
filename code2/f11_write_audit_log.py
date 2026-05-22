@@ -22,6 +22,7 @@ WHY threading lock:
 - Without locking, concurrent writes could corrupt the database
 """
 
+import base64
 import sqlite3
 import threading
 import json
@@ -29,14 +30,11 @@ import hashlib
 from pathlib import Path
 from datetime import datetime
 
-from Crypto.Cipher import AES
-import os
-
 # WHY: sqlite3 is built-in, lightweight, no server needed
 # — perfect for USB-portable logging
-import sqlite3
 
-# WHY: aes module is used to encrypt the log database
+# WHY: AES-GCM for per-field authenticated encryption of sensitive log fields
+# GCM provides both confidentiality and integrity — detects any tampering
 from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
 
@@ -106,27 +104,47 @@ class AuditLogger:
         entry_str = f"{timestamp}|{level}|{event}|{module}|{user_id}|{metadata_json}|{prev_hash}"
         return hashlib.sha256(entry_str.encode()).hexdigest()
 
-    def _encryptFile(self, conn, cursor) -> None:
-        """Encrypt the entire database file if encryption key provided."""
-        if self.encryption_key is None:
-            return
+    def _encrypt_field(self, plaintext: str) -> str:
+        """
+        AES-256-GCM encrypt a single log field.
 
-        # Read the database file
-        db_file = Path(self.db_path)
-        if not db_file.exists():
-            return
+        Returns a base64-JSON string containing iv, ciphertext, and auth tag.
+        If no encryption key is set, returns plaintext unchanged.
 
-        with open(db_file, 'rb') as f:
-            data = f.read()
+        WHY per-field encryption (not whole-DB encryption):
+        - Whole-DB encryption requires decrypting before every read (TOCTOU risk)
+        - Per-field encryption: each field independently authenticated
+        - Hash chain uses pre-encryption values so integrity check works without key
+        """
+        if self.encryption_key is None or plaintext is None:
+            return plaintext
+        iv = get_random_bytes(12)
+        cipher = AES.new(self.encryption_key, AES.MODE_GCM, nonce=iv)
+        ct, tag = cipher.encrypt_and_digest(plaintext.encode("utf-8"))
+        return json.dumps({
+            "iv": base64.b64encode(iv).decode("ascii"),
+            "ct": base64.b64encode(ct).decode("ascii"),
+            "tag": base64.b64encode(tag).decode("ascii"),
+        }, separators=(",", ":"))
 
-        # AES encrypt
-        cipher = AES.new(self.encryption_key, AES.MODE_ECB)
-        padded = data + b'\x00' * (cipher.block_size - len(data) % cipher.block_size)
-        encrypted = cipher.encrypt(padded)
+    def _decrypt_field(self, stored: str) -> str:
+        """
+        Decrypt an AES-GCM encrypted log field.
 
-        # Write encrypted
-        with open(db_file, 'wb') as f:
-            f.write(encrypted)
+        Returns plaintext string. If field is not a JSON blob (plaintext or
+        no key), returns stored value unchanged (backward compatible).
+        """
+        if self.encryption_key is None or stored is None:
+            return stored
+        try:
+            blob = json.loads(stored)
+            iv = base64.b64decode(blob["iv"])
+            ct = base64.b64decode(blob["ct"])
+            tag = base64.b64decode(blob["tag"])
+        except (json.JSONDecodeError, KeyError, Exception):
+            return stored  # plaintext field (legacy / key not set)
+        cipher = AES.new(self.encryption_key, AES.MODE_GCM, nonce=iv)
+        return cipher.decrypt_and_verify(ct, tag).decode("utf-8")
 
     def log(self, event: str, level: str = INFO, module: str = "SFFS",
             user_id: str = None, metadata: dict = None) -> dict:
@@ -144,54 +162,63 @@ class AuditLogger:
             dict: Contains log_id, timestamp, status
         """
         with self.lock:
-            # Build the log entry
             timestamp = datetime.now().isoformat()
             metadata_json = json.dumps(metadata, default=str) if metadata else ""
-            cursor = sqlite3.connect(str(self.db_path), timeout=30).cursor()
-            cursor.execute("SELECT entry_hash FROM audit_log ORDER BY log_id DESC LIMIT 1")
-            row = cursor.fetchone()
-            prev_hash = row[0] if row else "GENESIS"
-            cursor.connection.close()
 
-            # Compute entry_hash (SHA-256 of all other fields)
-            entry_hash = self._compute_entry_hash(
-                timestamp,
-                level,
-                event,
-                module,
-                user_id,
-                metadata_json,
-                prev_hash,
-            )
-
+            # Single connection + exclusive transaction — prevents race condition
+            # between concurrent processes reading prev_hash and inserting.
+            # BEGIN EXCLUSIVE locks the DB file for the duration of this write.
             conn = sqlite3.connect(str(self.db_path), timeout=30)
-            cursor = conn.cursor()
-
             try:
+                conn.execute("BEGIN EXCLUSIVE")
+                cursor = conn.cursor()
+
+                # Read prev_hash inside the exclusive transaction
                 cursor.execute(
-                    "INSERT INTO audit_log (timestamp, level, event, module, user_id, metadata, prev_hash, entry_hash) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (timestamp, level, event, module, user_id, metadata_json, prev_hash, entry_hash)
+                    "SELECT entry_hash FROM audit_log ORDER BY log_id DESC LIMIT 1"
                 )
+                row = cursor.fetchone()
+                prev_hash = row[0] if row else "GENESIS"
+
+                # Compute hash over PLAINTEXT values — verifyLogIntegrity()
+                # must be able to recompute without needing the encryption key.
+                entry_hash = self._compute_entry_hash(
+                    timestamp, level, event, module, user_id, metadata_json, prev_hash
+                )
+
+                # Encrypt sensitive fields before storage
+                enc_event = self._encrypt_field(event)
+                enc_module = self._encrypt_field(module)
+                enc_user_id = self._encrypt_field(user_id) if user_id else None
+                enc_metadata = self._encrypt_field(metadata_json) if metadata_json else metadata_json
+
+                cursor.execute(
+                    "INSERT INTO audit_log "
+                    "(timestamp, level, event, module, user_id, metadata, prev_hash, entry_hash) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (timestamp, level, enc_event, enc_module, enc_user_id,
+                     enc_metadata, prev_hash, entry_hash),
+                )
+                log_id = cursor.lastrowid
                 conn.commit()
 
-                # Check if rotation needed
+                # Rotation check (uses same open connection)
                 self._checkRotation(conn, cursor)
-
                 conn.close()
 
-                return {
-                    "log_id": cursor.lastrowid,
-                    "timestamp": timestamp,
-                    "status": "written"
-                }
+                return {"log_id": log_id, "timestamp": timestamp, "status": "written"}
+
             except Exception as e:
-                conn.rollback()
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.close()
                 return {
                     "log_id": None,
                     "timestamp": timestamp,
                     "status": "error",
-                    "error": str(e)
+                    "error": str(e),
                 }
 
     def _checkRotation(self, conn, cursor) -> None:
@@ -268,16 +295,19 @@ class AuditLogger:
 
         logs = []
         for row in cursor.fetchall():
+            # Decrypt sensitive fields before returning to caller
             log_entry = {
                 "log_id": row[0],
                 "timestamp": row[1],
                 "level": row[2],
-                "event": row[3],
-                "module": row[4],
-                "user_id": row[5],
-                "metadata": json.loads(row[6]) if row[6] else None,
+                "event": self._decrypt_field(row[3]),
+                "module": self._decrypt_field(row[4]),
+                "user_id": self._decrypt_field(row[5]),
+                "metadata": json.loads(
+                    self._decrypt_field(row[6])
+                ) if row[6] else None,
                 "prev_hash": row[7],
-                "entry_hash": row[8]
+                "entry_hash": row[8],
             }
 
             if level_filter and log_entry["level"] != level_filter:
@@ -310,7 +340,14 @@ class AuditLogger:
         for row in logs:
             log_id, timestamp, level, event, module, user_id, metadata, prev_hash, stored_hash = row
 
-            # Recompute hash
+            # Decrypt fields before recomputing hash — entry_hash was computed
+            # over plaintext, so we must decrypt first to verify correctly.
+            event = self._decrypt_field(event)
+            module = self._decrypt_field(module)
+            user_id = self._decrypt_field(user_id)
+            metadata = self._decrypt_field(metadata)
+
+            # Recompute hash over decrypted plaintext values
             metadata_json = metadata or ""
             computed_hash = self._compute_entry_hash(
                 timestamp,

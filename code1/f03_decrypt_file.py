@@ -66,7 +66,7 @@ class SecurityError(Exception):
 
 # SFFS format constants
 SFFS_MAGIC = b"SFFS"
-SFFS_VERSION = 0x01
+SFFS_VERSION = 0x02
 
 
 def decryptFile(
@@ -139,6 +139,13 @@ def decryptFile(
     version = file_content[pos]
     pos += 1
 
+    # Reject files with unknown version — prevents version confusion attacks
+    if version != SFFS_VERSION:
+        raise ValueError(
+            f"Unsupported SFFS version: 0x{version:02x}. "
+            f"Expected 0x{SFFS_VERSION:02x}. Re-encrypt with current SFFS."
+        )
+
     iv = file_content[pos : pos + 12]
     pos += 12
 
@@ -152,7 +159,10 @@ def decryptFile(
     # Stored in header so the .sffs filename doesn't leak the file type
     ext_len = file_content[pos]
     pos += 1
-    original_ext = file_content[pos : pos + ext_len].decode("utf-8")  # e.g. ".docx"
+    try:
+        original_ext = file_content[pos : pos + ext_len].decode("utf-8")  # e.g. ".docx"
+    except (UnicodeDecodeError, ValueError):
+        raise ValueError("SFFS file corrupted — invalid extension encoding in header")
     pos += ext_len
 
     # Ciphertext is everything after the header (includes GCM tag at end)

@@ -374,7 +374,12 @@ def unwrapAESKey(
         if bound_file_sha256:
             if not exp.exists():
                 raise FileNotFoundError(f"Expected .sffs file not found: {exp}")
-            actual_sha = hashlib.sha256(exp.read_bytes()).hexdigest()
+            # Stream hash to avoid OOM on large .sffs files
+            _h3 = hashlib.sha256()
+            with exp.open("rb") as _f3:
+                for _c3 in iter(lambda: _f3.read(8 * 1024 * 1024), b""):
+                    _h3.update(_c3)
+            actual_sha = _h3.hexdigest()
             if actual_sha != bound_file_sha256:
                 raise ValueError("Wrap metadata file-hash mismatch")
 

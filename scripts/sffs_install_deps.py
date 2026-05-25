@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Install missing SFFS dependencies from main-code/requirements.txt (cross-platform)."""
 
@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 REQ = ROOT / "main-code" / "requirements.txt"
 
 # Map pip package name -> import name to test
@@ -56,3 +56,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

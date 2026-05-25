@@ -1,7 +1,7 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-SFFS USB setup helper — list removable drives, optional copy, verify tree.
+SFFS USB setup helper â€” list removable drives, optional copy, verify tree.
 
 Usage:
     python sffs_usb_setup.py
@@ -16,7 +16,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def list_removable() -> None:
@@ -109,3 +109,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

@@ -1,0 +1,77 @@
+{
+  "$schema": "https://aka.ms/codetour-schema",
+  "title": "SFFS Onboarding — New Joiner / Architecture",
+  "description": "For new contributors. Walks the full lifecycle: entry point → orchestrator → crypto layer → auth & sandbox → emergency lock → UI. After this tour you can locate any code path and know which module to edit.",
+  "ref": "fix/security-bugfixes-round1-2",
+  "steps": [
+    {
+      "directory": "SFFS/main-code",
+      "title": "1. Start here — main-code/",
+      "description": "**Situation:** `main-code/` is the integration layer. It owns the entry point, the orchestration class, and the isolated worker subprocess. No crypto primitives live here — those belong to the student modules.\n\n**Mechanism:** Three files matter most:\n- `main.py` — CLI arg parsing + mode dispatch (GUI / headless / student runner / pytest)\n- `sffs_core.py` — `SFFSCore` singleton that sequences every operation\n- `isolated_worker.py` — out-of-process decrypt worker to isolate sensitive key material\n\n**Implication:** If you need to add a new top-level feature (new CLI flag, new operation), you touch `main.py` first, then reach down into student modules via `sffs_core.py`.\n\n**Gotcha:** There is also a `.venv/` inside `SFFS/` — don't confuse site-packages Python files with project source. All real source is under `code1/`, `code2/`, `code3/`, and `main-code/`."
+    },
+    {
+      "file": "SFFS/main-code/main.py",
+      "line": 342,
+      "title": "2. Entry point — main()",
+      "description": "**Situation:** `main()` is the single entry point. It parses args and dispatches to one of four modes: `--test`, `--student N`, `--headless`, or full GUI.\n\n**Mechanism:** Before dispatch, lines 347–351 handle `--secure-required` — they call `ensure_secure_mode()` which raises if no OS-level isolation (AppArmor on Linux, Windows Job Objects on Windows) is detected. This is the *fail-closed* security gate.\n\n**Implication:** The `--secure-required` path must remain synchronous and before any Qt or network code. If it moves after `QApplication` init, you lose the early-exit guarantee.\n\n**Gotcha:** `_usb_root` is a module-level global. It is set from `SFFS_ROOT` env var at import time (line 21–25) and can be overridden by `--usb-root`. Always pass `root_path` to `core.initialize()` from this value — never derive it elsewhere."
+    },
+    {
+      "file": "SFFS/main-code/sffs_core.py",
+      "line": 54,
+      "title": "3. Orchestrator — SFFSCore",
+      "description": "**Situation:** `SFFSCore` holds all live session state: paths dict, audit logger, process monitor, sandbox handle, WrapStore, and the session password bytearray.\n\n**Mechanism:** Initialization order is documented in the module docstring (lines 8–17) and is strict: drive detection → config load → auth DB → audit logger → process monitor → USB watch. The `login()` method (line 184) triggers sandbox creation and `_derive_wrap_key()` for the per-session AES key wrapping store.\n\n**Implication:** Any feature that needs session state must call `_require_session()` first (line 235). This raises immediately if called outside a logged-in session — which is the correct behavior.\n\n**Gotcha:** `_session_password` is a `bytearray`, not `str`. It is wiped via `secureMemoryWipe()` on logout (line 224). Never convert it to `str` and store the result anywhere persistent — only decode it transiently in `_master_password_str()`."
+    },
+    {
+      "directory": "SFFS/code1",
+      "title": "4. Module map — code1/ (crypto)",
+      "description": "**Situation:** `code1/` (Student 1) owns the entire cryptographic pipeline: key generation, AES-256-GCM file encryption, decryption, SHA-256 hashing, and the RSA keystore.\n\n**Mechanism:** Six functions (f01–f06), each in its own file:\n- `f01` → RSA-2048 key pair generation\n- `f02` → AES-256-GCM file encrypt → `.sffs` binary format\n- `f03` → decrypt `.sffs` → plaintext\n- `f04` / `f05` → SHA-256 hash generate / verify\n- `f06` → PBKDF2 + AES-GCM keystore (wrap/unwrap RSA private key)\n\n**Implication:** If you need to change cipher parameters or the `.sffs` wire format, touch `f02` and update `f03` to match. Both files' docstrings describe the exact binary layout.\n\n**Gotcha:** Student 1 owns this module. Don't add code here unless you are Student 1 or have explicit permission. Cross-student edits violate the ownership rules in CLAUDE.md."
+    },
+    {
+      "file": "SFFS/code1/f02_encrypt_file.py",
+      "line": 24,
+      "title": "5. .sffs wire format",
+      "description": "**Situation:** The `.sffs` binary format is defined in the module docstring. This comment block (lines 24–37) is the canonical spec — if it and the code disagree, fix the code.\n\n**Mechanism:** Header layout:\n```\nMagic (4B) | Version (1B) | Name Len (2B) | Name (N) | IV (16B)\n| Auth Tag (16B) | Hash Pre (32B) | File Size (8B) | Ciphertext\n```\nVersion `0x02` (line 60). AES-GCM is used from `cryptography.hazmat` (line 51). The IV is freshly generated per encryption; the GCM auth tag is stored inline so `f03` can verify authenticity before yielding any plaintext.\n\n**Implication:** The `hash_pre` field (SHA-256 of plaintext before encryption) enables post-decrypt integrity checking without an external signature. `f05_verify_hash.py` performs this check.\n\n**Gotcha:** The `IV` is 16 bytes here (AES block size), not 12 bytes (the GCM recommendation). This is a historical choice in this codebase — do not silently change it to 12 bytes without updating `f03` and all existing `.sffs` files."
+    },
+    {
+      "file": "SFFS/code1/f06_secure_key_storage.py",
+      "line": 12,
+      "title": "6. RSA private key — PBKDF2 + AES-GCM keystore",
+      "description": "**Situation:** The RSA private key is the master secret in SFFS. If it leaks, every `.sffs` file ever encrypted with it is compromised.\n\n**Mechanism:** PBKDF2-SHA256 at 310 000 iterations derives a 32-byte wrapping key from the user's master password + a per-keystore random salt. That wrapping key encrypts the private key with AES-256-GCM and the result is stored as `keystore_<id>.json` under `sffs_data/keys/`. `wrapAESKey()` (used in `sffs_core.encryptFileOperation`) RSA-OAEP wraps the per-file AES key with the public key, storing the ciphertext in `WrapStore` (SQLite).\n\n**Implication:** On decrypt, the chain is: master password → PBKDF2 → unwrap RSA private key → RSA-OAEP unwrap per-file AES key → AES-GCM decrypt. If the master password changes, the keystore must be re-wrapped.\n\n**Gotcha:** `verifyKeystorePassword()` is called before every encrypt (see `sffs_core._ensure_rsa_keys`). If the keystore was created with a different password, it raises. Don't assume the keystore matches the current session password — always verify."
+    },
+    {
+      "directory": "SFFS/code2",
+      "title": "7. Module map — code2/ (runtime security)",
+      "description": "**Situation:** `code2/` (Student 2) owns everything that happens *around* the crypto: process isolation, authentication, process monitoring, audit logging, and emergency shutdown.\n\n**Mechanism:** Six functions (f07–f12):\n- `f07` → create/destroy the per-session sandbox directory\n- `f08` → `secureMemoryWipe()` — zero out sensitive bytearrays\n- `f09` → Argon2id auth + SQLite sessions DB\n- `f10` → `ProcessMonitor` — psutil-based debugger/injector detection\n- `f11` → `AuditLogger` — encrypted, hash-chained SQLite audit log\n- `f12` → `emergencyLock()` — < 500 ms wipe-and-exit sequence\n\n**Implication:** `ProcessMonitor` (f10) runs in a background thread. When it detects a threat, it calls `SFFSCore._on_threat_detected()` which immediately calls `emergencyLock()` before the callback returns.\n\n**Gotcha:** The `os_isolation.py` helper (also in this directory) checks for Windows Job Objects or Linux AppArmor. It is used by `main.py --secure-required`. It is not a student-owned file but lives here for co-location."
+    },
+    {
+      "file": "SFFS/code2/f09_authenticate_user.py",
+      "line": 55,
+      "title": "8. Auth — Argon2id + exponential backoff",
+      "description": "**Situation:** `_compute_lock_until()` calculates the lockout timestamp from failed attempt count. This implements the exponential backoff policy: 30s, 60s, 120s, 300s, capped at 1 hour.\n\n**Mechanism:** Argon2id (time_cost=3, memory_cost=64 MB, parallelism=4) hashes the password on registration. On login, `hmac.compare_digest()` is used for constant-time hash comparison (line 37) — preventing timing-oracle attacks where an attacker deduces password character by character from response latency.\n\n**Implication:** The `lockout_until` column in the `users` table is checked before every login attempt. Even if the attacker knows the hash algorithm, they can't bypass lockout by racing — lockout is enforced before any Argon2 computation.\n\n**Gotcha:** `authenticateUser` accepts a `bytearray` for the password, not `str`. `sffs_core.login()` wipes the caller's copy with `secureMemoryWipe()` *after* calling `authenticateUser`. If you add a new call site, you must wipe immediately after — don't hold a reference."
+    },
+    {
+      "file": "SFFS/code2/f07_create_isolated_sandbox.py",
+      "line": 45,
+      "title": "9. Sandbox — per-session decryption jail",
+      "description": "**Situation:** `createIsolatedSandbox()` makes a session-scoped directory with owner-only permissions. Decrypted files land here, never in the OS temp directory.\n\n**Mechanism:** On Linux: `chmod 0o700`. On Windows: `icacls` ACL. The directory is named `sffs_sandbox_<session_id>/` under `sffs_data/sandbox/`. `destroySandbox()` zeroes files before deletion (via `secureMemoryWipe`) and then removes the directory tree.\n\n**Implication:** The sandbox is destroyed on logout *and* on emergency lock. If the process crashes without calling either, the directory stays on disk. The `sffs_data/` directory should be on the USB drive, so physical removal of the USB deletes the data — but `destroySandbox` should still be called defensively.\n\n**Gotcha:** On Windows, ACL-restricted directories don't stop a process running as the same user from reading them. The sandbox is protection against *other* user accounts and forensic tools, not against malware running as the current user. That threat is handled by `ProcessMonitor` + `emergencyLock`."
+    },
+    {
+      "file": "SFFS/code2/f12_emergency_lock.py",
+      "line": 9,
+      "title": "10. Emergency lock — the < 500 ms wipe sequence",
+      "description": "**Situation:** Lines 9–16 document the ordered sequence that must complete in under 500 ms when a threat is detected (USB pull, debugger attach, max failures).\n\n**Mechanism:** The sequence is:\n1. Set `EMERGENCY_ACTIVE` flag\n2. Close file handles\n3. `secureMemoryWipe()` all sensitive buffers\n4. `destroySandbox()` — delete decrypted files\n5. `terminateSession()` — delete session token from DB\n6. Write CRITICAL audit entry\n7. `sys.exit(0)` — hard kill\n\nThe audit log write is deliberately *last* — it acts as a proof-of-completion tombstone. A missing final log entry means the lock failed mid-sequence.\n\n**Implication:** `emergencyLock()` is called from three places: `SFFSCore._on_threat_detected`, `SFFSCore._on_usb_removed`, and from `f10_monitor_process` callbacks. All three paths converge here — don't add a fourth without also adding a test for it.\n\n**Gotcha:** `sys.exit(0)` bypasses Python's `atexit` handlers. This is intentional — atexit handlers can be hijacked. If you add any critical cleanup logic, put it *inside* `emergencyLock` before the `sys.exit`, not in an atexit hook."
+    },
+    {
+      "file": "SFFS/code3/f14_ui_dashboard.py",
+      "line": 40,
+      "title": "11. UI — PyQt6 dashboard entry",
+      "description": "**Situation:** `apply_sffs_theme()` sets the global Qt stylesheet on the `QApplication` instance. `SFSSDashboard` (defined later in this file) is the main window class that the login flow hands off to.\n\n**Mechanism:** PyQt6 signals/slots connect UI actions to `sffs_core` operations wired in `main.py`'s `run_full_app()`. The dashboard does *not* call crypto functions directly — it only calls `core.encryptFileOperation()` and `core.decryptFileOperation()`. The `f18_thread_controller.py` manages long-running operations off the GUI thread.\n\n**Implication:** If you need to add a new button or panel, subclass or extend `SFSSDashboard` in this file. Never import `code1` or `code2` modules directly from UI code — always go through `SFFSCore`.\n\n**Gotcha:** Mouse entropy (`mouse_entropy.py`) feeds the AES key RNG from mouse move events. The `_EntropyFilter` event filter (in `main.py` line 126) is installed on the `QApplication`, not on the window. If you remove that filter install, entropy collection silently stops and the `interactive` entropy mode will always block at the entropy dialog."
+    },
+    {
+      "file": "SFFS/main-code/isolated_worker.py",
+      "line": 48,
+      "title": "12. Isolated worker — out-of-process decrypt boundary",
+      "description": "**Situation:** Line 48 is where the worker imports `decryptFile` and `unwrapAESKey` — the only two crypto calls it makes. Everything before this is path setup and nonce-replay defense.\n\n**Mechanism:** `SFFSCore._decrypt_via_worker()` spawns this script as a subprocess, passing an HMAC-signed JSON envelope via `--payload`. The worker verifies the HMAC signature and nonce (to prevent replay), decrypts the file inside the subprocess's memory space, and returns JSON via stdout. If the worker crashes or the signature fails, `sffs_core` receives no valid JSON and raises `SecurityError`.\n\n**Implication:** The key material (master password, AES key) exists in the worker process's memory — not in the main GUI process. An attacker who can read the GUI process's memory cannot get the per-file AES key. This is the process isolation boundary.\n\n**Gotcha:** The `_SEEN_NONCES` dict (line 52) is process-local and in-memory. It prevents nonce reuse *within a single worker invocation*, but the worker process is short-lived (one decrypt per spawn). Cross-invocation replay is prevented by the `issued_at` timestamp check (30-second TTL in `_NONCE_TTL_SECONDS`). Don't increase the TTL without auditing the replay window.\n\n---\n\n**You're ready.** You can now:\n- Trace any encrypt/decrypt call from `main.py` → `SFFSCore` → `code1` functions\n- Understand which module to edit for auth changes (`code2/f09`), UI changes (`code3/f14`), or format changes (`code1/f02` + `f03`)\n- Run `pytest tests -q` to verify your changes don't break any of the three student modules\n- Check `.github/workflows/tests.yml` for the full CI matrix before opening a PR"
+    }
+  ]
+}

@@ -1,6 +1,0 @@
-{
-  "allowed_actions": [
-    "decrypt"
-  ],
-  "output_root_relative": "decrypted"
-}

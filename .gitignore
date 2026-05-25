@@ -1,34 +1,52 @@
-# Env & caches
-SFFS/.venv/
-SFFS/sffs_data/
-SFFS/graphify-out/
-SFFS/.pytest_cache/
-SFFS/.agenthub/
-SFFS/.claude/
+# Env & virtual environments
+.venv/
+venv/
+env/
+
+# Runtime data (never commit)
+sffs_data/
+
+# Python caches
 __pycache__/
 *.pyc
 *.pyo
+.pytest_cache/
 
-# Sensitive
-SFFS/security/
+# Node / JS
+node_modules/
+
+# Bundled portable apps (binary, not source)
+apps/7zip/
+apps/imageglass/
+
+# Graphify: keep output, skip cache
+graphify-out/cache/
+
+# Sensitive / security configs
+security/
 *.pem
 *.key
 .env*
 
-# Claude / Obsidian internals
+# Claude / Obsidian / tool internals
 .claude/
 .obsidian/
 .agenthub/
 
-# Root-level junk (not part of SFFS project)
+# Test artifacts
+test_output/
+scripts/usb-pack/build/
+scripts/usb-pack/dist/
+
+# Docs not part of source
 SFFS_audit_report.csv
 SFFS_Functions_Breakdown.docx
 claude_code_skills_plan.md
 phase3_4_results.md
-
-# Graphify: keep output, skip cache
-graphify-out/cache/
-SFFS/graphify-out/cache/
+GP2-Finalizer*.docx
+SFFS_Presentation.pptx
+GP1*
+sffs_pptx.js
 
 # OS
 Thumbs.db

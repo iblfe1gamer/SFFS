@@ -21,6 +21,7 @@ Check interval of 500ms balances detection speed with CPU usage.
 """
 
 import ctypes
+import itertools
 import os
 import platform
 import psutil
@@ -89,8 +90,13 @@ def checkSuspiciousProcesses() -> list:
     """
     suspicious = []
 
-    # Get running processes
-    processes = psutil.process_iter()
+    # Get running processes — cap at MAX_PROCS to bound latency on busy systems.
+    # WHY: On a system with thousands of processes psutil.process_iter() can
+    # take seconds.  Legitimate debuggers typically appear early in the list;
+    # capping at 1 000 gives a good detection rate with predictable overhead.
+    MAX_PROCS = 1000
+    proc_iter = psutil.process_iter(["name", "exe"])
+    processes = list(itertools.islice(proc_iter, MAX_PROCS))
 
     # List of known debugging/analysis tools
     if platform.system() == "Windows":

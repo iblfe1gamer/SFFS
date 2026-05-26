@@ -51,6 +51,29 @@ from f17_config_loader import configLoader
 from mouse_entropy import session_random_bytes
 
 
+class ConfigValidator:
+    """
+    Validate the SFFS path map before any crypto operations.
+
+    WHY a separate class:
+    - Startup misconfiguration (missing dirs, wrong permissions) causes
+      confusing failures deep inside crypto modules.  Checking early gives
+      a clear error message before any sensitive operation begins.
+    """
+
+    def validate(self, paths: dict) -> list[str]:
+        """Return a list of error strings; empty list means all is well."""
+        errors: list[str] = []
+        for key in ("data_dir", "keys_dir", "sandbox_dir"):
+            val = paths.get(key)
+            if not val or not Path(val).exists():
+                errors.append(f"Missing required path: {key} = {val!r}")
+        auth_db = Path(paths.get("data_dir", ".")) / "auth.db"
+        if auth_db.exists() and not os.access(auth_db, os.R_OK | os.W_OK):
+            errors.append(f"auth.db is not readable/writable: {auth_db}")
+        return errors
+
+
 class SFFSCore:
     """Central orchestration for SFFS."""
 
@@ -110,6 +133,12 @@ class SFFSCore:
         cfg_dir = self.paths["config_dir"]
         self.config = configLoader("load", cfg_dir, encryption_key=None)
         self._auth_db = self.paths["data_dir"] / "auth.db"
+
+        # Validate critical paths before any crypto operation.
+        errs = ConfigValidator().validate(self.paths)
+        if errs:
+            raise RuntimeError("SFFS startup config errors:\n" + "\n".join(f"  • {e}" for e in errs))
+
         initAuthDatabase(self._auth_db)
 
         log_db = self.paths["logs_dir"] / "audit.db"
@@ -173,7 +202,16 @@ class SFFSCore:
             sid = (self.session_token or secrets.token_hex(8))[:16]
             self.sandbox = createIsolatedSandbox(self.paths["sandbox_dir"], session_id=sid)
             self._decrypt_cache.clear()
-            wrap_key = self._derive_wrap_key(self._session_password.decode("utf-8"))
+            # WHY try/finally: if decode("utf-8") raises (e.g. the bytearray
+            # contains non-UTF-8 bytes from an unusual password), the exception
+            # propagates but _pw_str must still be cleaned up to avoid lingering
+            # plaintext password on the stack.
+            _pw_str = None
+            try:
+                _pw_str = self._session_password.decode("utf-8")
+                wrap_key = self._derive_wrap_key(_pw_str)
+            finally:
+                del _pw_str
             wrap_db_path = self.paths["keys_dir"] / "wrap_store.db"
             self._wrap_store = WrapStore(wrap_db_path, wrap_key)
             self._wrap_store.initialize()
@@ -232,7 +270,13 @@ class SFFSCore:
             secureKeyStorage(g["private_key_bytes"], master_password, keys_dir)
             pub = g["public_key_path"]
         else:
-            ks = next(keys_dir.glob("keystore_*.json"), None)
+            # Match keystore by key_id extracted from public key filename.
+            # pub.stem = "public_key_<key_id>" → key_id = part after last "_"
+            key_id = pub.stem.split("public_key_", 1)[-1]
+            ks = keys_dir / f"keystore_{key_id}.json"
+            if not ks.exists():
+                # Fallback: pick first available keystore (legacy layout)
+                ks = next(keys_dir.glob("keystore_*.json"), None)
             if ks:
                 vr = verifyKeystorePassword(ks, master_password)
                 if not vr["valid"]:
@@ -341,6 +385,9 @@ class SFFSCore:
         master_password: str,
     ) -> dict:
         is_external = sandbox_root is None
+        # SECURITY: master_password intentionally excluded from CLI payload.
+        # It is passed via stdin pipe so it never appears in the process argument
+        # list (visible via tasklist /V, /proc/<pid>/cmdline, or audit logs).
         payload = {
             "sffs_path": str(sffs_path),
             "wrap_data_b64": base64.b64encode(wrap_data).decode("ascii"),
@@ -348,7 +395,6 @@ class SFFSCore:
             "output_dir": str(output_dir),
             "sandbox_root": str(sandbox_root) if sandbox_root else "",
             "is_external_output": is_external,
-            "master_password": master_password,
         }
         envelope = self._sign_worker_payload(payload)
         proc = subprocess.Popen(
@@ -360,6 +406,7 @@ class SFFSCore:
                 "--payload",
                 json.dumps(envelope),
             ],
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -372,7 +419,11 @@ class SFFSCore:
         with self._workers_lock:
             self._active_workers[proc.pid] = proc
         try:
-            stdout, stderr = proc.communicate(timeout=60)
+            # master_password delivered via stdin — not in CLI args
+            stdout, stderr = proc.communicate(
+                input=master_password + "\n",
+                timeout=60,
+            )
         finally:
             with self._workers_lock:
                 self._active_workers.pop(proc.pid, None)

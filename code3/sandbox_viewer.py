@@ -114,7 +114,33 @@ def show_sandbox_file_viewer(parent, path: Path, max_bytes: int = 512_000) -> st
         "inline" when shown in app, "external" when launched externally,
         "error" when opening failed.
     """
-    path = Path(path)
+    path = Path(path).resolve()
+
+    # SECURITY: Validate the requested path is inside the sandbox decrypted root
+    # before performing any file I/O.  Without this check, a caller could pass
+    # an arbitrary host path and read any file the process can access.
+    core = getattr(parent, "_core", None)
+    if core is not None:
+        sandbox = getattr(core, "sandbox", None)
+        if sandbox:
+            decrypted_root = Path(sandbox["decrypted_dir"]).resolve()
+            try:
+                path.relative_to(decrypted_root)
+            except ValueError:
+                _audit(
+                    parent,
+                    "Sandbox boundary violation blocked",
+                    "WARN",
+                    {"path": str(path), "sandbox_root": str(decrypted_root)},
+                )
+                QMessageBox.warning(
+                    parent,
+                    "Access blocked",
+                    f"File is outside the sandbox boundary:\n{path}\n\n"
+                    f"Only files inside the decrypted sandbox may be viewed.",
+                )
+                return "error"
+
     if not path.exists():
         QMessageBox.warning(parent, "File missing", f"Sandbox file not found:\n{path}")
         return "error"

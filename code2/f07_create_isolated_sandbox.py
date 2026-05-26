@@ -80,18 +80,28 @@ def createIsolatedSandbox(base_path: Path, session_id: str = None) -> dict:
         # Linux: Use chmod for owner-only access
         os.chmod(sandbox_path, 0o700)
     elif platform.system() == "Windows":
-        # Windows: Remove inherited permissions and grant only current user
+        # Windows: Remove inherited permissions and grant only current user.
+        # WHY: This command removes inherited permissions and grants access only to current user.
+        # SECURITY: Failure is NOT silently swallowed — an unprotected sandbox directory
+        # would retain inherited (potentially world-readable) ACLs, undermining isolation.
         try:
-            # WHY: This command removes inherited permissions and grants access only to current user
             current_user = os.environ.get('USERNAME', 'USER')
             subprocess.run([
                 'icacls', str(sandbox_path),
                 '/inheritance:r',  # Remove inherited permissions
                 '/grant:r', f'{current_user}:(OI)(CI)F'  # Grant full control only to current user
-            ], check=True)
-        except subprocess.CalledProcessError:
-            # Fallback: Just ensure directory exists
-            pass
+            ], check=True, capture_output=True, stdin=subprocess.DEVNULL)
+        except subprocess.CalledProcessError as e:
+            # Clean up the unprotected directory before raising so it doesn't
+            # linger on disk with open permissions.
+            try:
+                shutil.rmtree(str(sandbox_path))
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"Failed to set restrictive ACLs on sandbox {sandbox_path}: {e}. "
+                f"Sandbox isolation cannot be guaranteed — aborting creation."
+            ) from e
 
     # Create subdirectories
     decrypted_dir = sandbox_path / "decrypted"
@@ -101,11 +111,32 @@ def createIsolatedSandbox(base_path: Path, session_id: str = None) -> dict:
     temp_dir.mkdir(parents=True, exist_ok=True)
     keys_runtime_dir.mkdir(parents=True, exist_ok=True)
 
-    # Write sandbox.lock file containing session_id and timestamp
+    # Write sandbox.lock file containing session_id and timestamp.
+    # SECURITY: On Linux, use os.open with mode 0o600 so the lock file is
+    # owner-readable only, preventing session_id leaking to other local users.
     lock_file = sandbox_path / "sandbox.lock"
     created_time = int(time.time())
     lock_content = f"session_id={session_id}\ncreated={created_time}\n"
-    lock_file.write_text(lock_content)
+    if platform.system() == "Linux":
+        fd = os.open(str(lock_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, lock_content.encode("utf-8"))
+        finally:
+            os.close(fd)
+    else:
+        lock_file.write_text(lock_content)
+
+    # On Windows, verify ACLs were not silently left broad after icacls.
+    # Done AFTER lock file creation so isSandboxIntact() can pass its full check.
+    if platform.system() == "Windows" and not isSandboxIntact(sandbox_path):
+        try:
+            shutil.rmtree(str(sandbox_path))
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"ACL verification failed post-icacls on {sandbox_path} — "
+            f"broad permissions detected. Sandbox isolation cannot be guaranteed."
+        )
 
     # Return dict with sandbox info
     return {
@@ -158,6 +189,24 @@ def destroySandbox(sandbox_path: Path) -> bool:
         return False
 
 
+def _write_and_sync(path: Path, data: bytes) -> None:
+    """
+    Write *data* to *path* and fsync before returning.
+
+    WHY fsync after each overwrite pass:
+    - Without fsync the OS write cache may hold the data in RAM; if the system
+      crashes between overwrite passes, only the older pass reaches disk.
+    - fsync flushes the kernel page cache for the file to the storage device
+      before we proceed to the next pass or deletion.
+    - This is especially important on SSDs with internal write caches and on
+      USB drives where the device may reorder writes arbitrarily.
+    """
+    with open(path, "wb") as fh:
+        fh.write(data)
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
 def secureWipeDirectory(directory: Path) -> None:
     """
     Securely wipe all files in a directory using DOD 5220.22-M 3-pass standard.
@@ -204,18 +253,18 @@ def secureWipeDirectory(directory: Path) -> None:
             # Pass 1: overwrite with zeros
             if file_size > 0:
                 zeros = bytearray(file_size)
-                file_path.write_bytes(zeros)
+                _write_and_sync(file_path, zeros)
 
             # Pass 2: overwrite with ones
             if file_size > 0:
                 ones = bytearray(file_size)
                 ones[:] = b'\xff' * file_size
-                file_path.write_bytes(ones)
+                _write_and_sync(file_path, ones)
 
             # Pass 3: overwrite with random bytes
             if file_size > 0:
                 random_bytes = os.urandom(file_size)
-                file_path.write_bytes(random_bytes)
+                _write_and_sync(file_path, random_bytes)
 
             # Delete the file
             try:
@@ -285,8 +334,30 @@ def isSandboxIntact(sandbox_path: Path) -> bool:
         except OSError:
             return False
     elif platform.system() == "Windows":
-        # On Windows, we can't easily check ACLs, so assume intact if it exists
-        pass
+        # Verify ACLs have not been broadened by checking icacls output.
+        # If broad access entries (Everyone, BUILTIN\Users, etc.) appear,
+        # the sandbox has been tampered with or icacls setup failed.
+        try:
+            result = subprocess.run(
+                ["icacls", str(sandbox_path), "/Q"],
+                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                text=True,
+                check=True,
+            )
+            output = result.stdout
+            broad_entries = [
+                "Everyone",
+                "BUILTIN\\Users",
+                "NT AUTHORITY\\Authenticated Users",
+            ]
+            for entry in broad_entries:
+                if entry in output:
+                    print(f"Warning: Sandbox ACL contains broad entry: {entry}")
+                    return False
+        except (subprocess.CalledProcessError, OSError) as e:
+            print(f"Warning: Could not verify sandbox ACL: {e}")
+            return False
 
     return True
 

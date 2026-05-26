@@ -121,6 +121,11 @@ def encryptFile(
     # Extension is stored inside the header — hidden from directory listings.
     original_ext = input_path.suffix.encode("utf-8")   # e.g. b".docx" (≤ 255 bytes)
     ext_len = len(original_ext)                         # 1 byte length prefix
+    # Bounds check: real file extensions are always short (e.g. ".docx" = 5 bytes).
+    # The header field is a uint8 so values > 255 would overflow struct.pack("B", …);
+    # we cap at 32 to reject obviously malformed inputs early.
+    if ext_len > 32:
+        raise ValueError(f"File extension too long ({ext_len} bytes); max 32")
 
     # Assemble SFFS V2 file header (58 + ext_len bytes total)
     # Header fields:

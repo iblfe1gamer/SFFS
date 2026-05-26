@@ -421,7 +421,19 @@ class LoginWindow(QDialog):
             self._token = r.get("session_token")
             self.accept()
         else:
-            QMessageBox.warning(self, "Login failed", str(r.get("message", "Invalid credentials")))
+            locked_until = r.get("locked_until")
+            if locked_until:
+                # Distinguish account-lock from wrong password — rate-limit feedback.
+                # QMessageBox.critical (red icon) makes it visually distinct so the
+                # user understands they must wait, not just re-try immediately.
+                QMessageBox.critical(
+                    self,
+                    "Account Locked",
+                    f"Too many failed attempts.\nAccount locked until {locked_until}.\n\n"
+                    "Please wait before trying again.",
+                )
+            else:
+                QMessageBox.warning(self, "Login failed", str(r.get("message", "Invalid credentials")))
 
     @property
     def session_token(self) -> str | None:

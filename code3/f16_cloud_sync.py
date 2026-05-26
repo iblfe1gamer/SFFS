@@ -68,6 +68,37 @@ def authenticateGoogleDrive(config_dir: Path, client_secrets_path: Path) -> "Cre
     return creds
 
 
+def _assert_keystore_encrypted(local_path: Path) -> None:
+    """
+    Verify a keystore file has the expected encrypted structure before upload.
+
+    WHY this check:
+    Uploading a keystore JSON that lacks the KDF/ciphertext fields would mean
+    uploading raw key material to Google Drive — a catastrophic secret exposure.
+    This check fails fast with a clear error rather than silently uploading
+    plaintext private key bytes.
+
+    Raises:
+        ValueError: If required fields are missing (file appears unencrypted).
+    """
+    try:
+        data = json.loads(local_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        # Not a keystore JSON — allow upload (might be another file type)
+        return
+    # Only enforce for files that look like keystores (have "version" field)
+    if "version" not in data:
+        return
+    required = {"kdf", "encrypted_private_key", "auth_tag", "iv", "salt"}
+    missing = required - set(data.keys())
+    if missing:
+        raise ValueError(
+            f"Keystore at {local_path.name} appears unencrypted — "
+            f"missing fields: {sorted(missing)}. Upload aborted to prevent "
+            f"raw key material exposure."
+        )
+
+
 def _ensure_backup_folder(service) -> str:
     """Return folder ID for SFFS_Backup, creating if needed."""
     q = f"name='{BACKUP_FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
@@ -130,6 +161,12 @@ def cloudSync(
             lp = Path(local_path)
             if not lp.is_file():
                 return {"status": "error", "message": "local_path must be a file"}
+            # Safety check: refuse to upload keystore files that lack encryption
+            # fields — prevents raw RSA private key exposure on Google Drive.
+            try:
+                _assert_keystore_encrypted(lp)
+            except ValueError as e:
+                return {"status": "error", "message": str(e)}
             parent = _ensure_backup_folder(service)
             remote_name = f"sffs_{lp.name}"
             meta = {"name": remote_name, "parents": [parent]}

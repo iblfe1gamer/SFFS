@@ -232,9 +232,11 @@ def authenticateUser(username: str, password: bytearray, db_path: Path) -> dict:
             is_valid = pw.verify(password_hash, password_str)
         except VerifyMismatchError:
             is_valid = False
-
-        # Wipe caller-owned password buffer as soon as verification is done.
-        secureMemoryWipe(password)
+        finally:
+            # WHY finally: guarantees wipe even if pw.verify() raises an unexpected
+            # exception (e.g. argon2.exceptions.VerificationError, MemoryError).
+            # Without finally, any non-VerifyMismatchError propagates and skips wipe.
+            secureMemoryWipe(password)
 
         if not is_valid:
             failed_attempts += 1

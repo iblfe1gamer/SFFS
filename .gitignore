@@ -8,6 +8,10 @@ sffs_data/
 
 # Python caches
 __pycache__/
+
+# Coverage artifacts (generated, not source)
+.coverage
+htmlcov/
 *.pyc
 *.pyo
 .pytest_cache/

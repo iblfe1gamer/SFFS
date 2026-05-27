@@ -165,7 +165,8 @@ def main() -> int:
 
     hjob = _create_job_object()
     try:
-        child = subprocess.Popen(args, env=env, cwd=str(repo_root))
+        child = subprocess.Popen(args, env=env, cwd=str(repo_root),
+                                 creationflags=subprocess.CREATE_NO_WINDOW)
         _assign_process_to_job(hjob, child.pid)
         return child.wait()
     finally:

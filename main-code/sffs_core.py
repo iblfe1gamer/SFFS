@@ -397,6 +397,7 @@ class SFFSCore:
             "is_external_output": is_external,
         }
         envelope = self._sign_worker_payload(payload)
+        _win_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         proc = subprocess.Popen(
             [
                 sys.executable,
@@ -415,6 +416,7 @@ class SFFSCore:
                 "SFFS_IPC_KEY": self._ipc_secret,
                 "SFFS_WORKER_POLICY": str(self._worker_policy),
             },
+            creationflags=_win_flags,
         )
         with self._workers_lock:
             self._active_workers[proc.pid] = proc
@@ -485,6 +487,7 @@ class SFFSCore:
                     ["taskkill", "/PID", str(pid), "/T", "/F"],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
                 )
                 proc.wait(timeout=3)
             except Exception:

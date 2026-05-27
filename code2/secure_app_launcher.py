@@ -195,6 +195,7 @@ def launch_sandbox_file(
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NO_WINDOW if platform.system().lower() == "windows" else 0,
     )
     result = {
         "status": "launched",

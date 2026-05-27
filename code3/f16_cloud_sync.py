@@ -30,6 +30,11 @@ except ImportError:
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 BACKUP_FOLDER_NAME = "SFFS_Backup"
 
+# Bundled OAuth credentials — ships with the app so users need zero Google Cloud setup.
+# Desktop-app client_secret is intentionally semi-public (Google's own guidance for
+# installed-application OAuth; security comes from the user's Google sign-in, not this file).
+_BUNDLED_SECRET = Path(__file__).parent / "google_client_secret.json"
+
 
 def loadCredentials(config_dir: Path) -> "Credentials | None":
     """
@@ -50,15 +55,30 @@ def loadCredentials(config_dir: Path) -> "Credentials | None":
         return None
 
 
-def authenticateGoogleDrive(config_dir: Path, client_secrets_path: Path) -> "Credentials":
+def authenticateGoogleDrive(config_dir: Path, client_secrets_path: Path = None) -> "Credentials":
     """
     Run installed-app OAuth flow and persist token to ``google_token.json``.
 
+    Args:
+        config_dir: Directory where google_token.json will be saved.
+        client_secrets_path: Path to client_secret.json. If None or missing,
+            falls back to the bundled credentials shipped with the app — so
+            end users need no Google Cloud Console access.
+
     Raises:
         RuntimeError: If Google libraries unavailable or flow fails.
+        FileNotFoundError: If no credentials found anywhere.
     """
     if not _GOOGLE_OK:
         raise RuntimeError("Google API libraries not installed")
+    # Resolve credentials: caller-supplied → bundled → error
+    if client_secrets_path is None or not Path(client_secrets_path).exists():
+        client_secrets_path = _BUNDLED_SECRET
+    if not Path(client_secrets_path).exists():
+        raise FileNotFoundError(
+            "No Google OAuth credentials found. "
+            "Contact the SFFS team or place client_secret.json in the config directory."
+        )
     config_dir = Path(config_dir)
     config_dir.mkdir(parents=True, exist_ok=True)
     flow = InstalledAppFlow.from_client_secrets_file(str(client_secrets_path), SCOPES)

@@ -1164,10 +1164,67 @@ class SettingsPage(QWidget):
             return
         result = self._core.backupKeys()
         status = result.get("status", "unknown")
-        if status in ("offline", "not_authenticated", "no_keys", "skipped"):
+        if status == "not_authenticated":
+            reply = QMessageBox.question(
+                self, "Connect to Google Drive",
+                "Back up your encrypted keys to Google Drive.\n\n"
+                "Your browser will open for a one-time Google sign-in.\n"
+                "Do you want to connect now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._run_google_auth()
+        elif status in ("offline", "no_keys", "skipped"):
             QMessageBox.information(self, "Cloud Backup", result.get("message", status))
         else:
-            QMessageBox.information(self, "Cloud Backup", f"Done:\n{result}")
+            QMessageBox.information(self, "Cloud Backup", f"Backup complete:\n{result}")
+
+    def _run_google_auth(self) -> None:
+        from PyQt6.QtCore import QThread, pyqtSignal
+        from PyQt6.QtWidgets import QProgressDialog
+
+        config_dir = self._core.paths["config_dir"]
+
+        class _AuthWorker(QThread):
+            finished = pyqtSignal(bool, str)
+
+            def __init__(self, cfg):
+                super().__init__()
+                self._cfg = cfg
+
+            def run(self):
+                try:
+                    from f16_cloud_sync import authenticateGoogleDrive
+                    authenticateGoogleDrive(self._cfg)  # uses bundled secret
+                    self.finished.emit(True, "")
+                except Exception as exc:
+                    self.finished.emit(False, str(exc))
+
+        self._auth_worker = _AuthWorker(config_dir)
+        dlg = QProgressDialog(
+            "Your browser is opening for Google sign-in.\n"
+            "Complete the sign-in, then return here.",
+            "Cancel", 0, 0, self,
+        )
+        dlg.setWindowTitle("Connect to Google Drive")
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.canceled.connect(self._auth_worker.terminate)
+        self._auth_dlg = dlg
+
+        def _on_done(ok, err):
+            dlg.close()
+            if ok:
+                res = self._core.backupKeys()
+                QMessageBox.information(self, "Cloud Backup", f"Backup complete:\n{res}")
+            else:
+                QMessageBox.critical(
+                    self, "Connection Failed",
+                    f"Could not connect to Google Drive:\n{err}",
+                )
+
+        self._auth_worker.finished.connect(_on_done)
+        self._auth_worker.start()
+        dlg.exec()
 
 
 # ── Main dashboard window ──────────────────────────────────────────────────

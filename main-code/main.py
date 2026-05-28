@@ -41,6 +41,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override USB root (advanced)",
     )
+    p.add_argument("--demo-user",     default="demo_user", help="Headless demo username")
+    p.add_argument("--demo-password", default=None,        help="Headless demo password (skips prompt)")
     return p.parse_args()
 
 
@@ -57,28 +59,39 @@ def run_student_demo(n: int) -> int:
     return r.returncode
 
 
-def run_headless_demo() -> None:
+def run_headless_demo(args) -> None:
     from getpass import getpass
 
     from f09_authenticate_user import initAuthDatabase, registerUser
     from sffs_core import SFFSCore
+
+    _DEMO_PASSWORD = "Demo@SFFS2025!"  # meets policy: 12+, upper, lower, digit, special
+
+    interactive = sys.stdin.isatty()
 
     core = SFFSCore()
     core.initialize()
     initAuthDatabase(core.paths["data_dir"] / "auth.db")
 
     print("=== SFFS headless demo ===")
-    user = input("Username [demo_user]: ").strip() or "demo_user"
-    mp = getpass("Account password (12+ chars, upper, lower, digit, special): ")
 
-    db = core.paths["data_dir"] / "auth.db"
+    if interactive and not args.demo_password:
+        user = input("Username [demo_user]: ").strip() or "demo_user"
+        mp   = getpass("Account password (12+ chars, upper, lower, digit, special): ")
+    else:
+        user = args.demo_user
+        mp   = args.demo_password or _DEMO_PASSWORD
+        print(f"Non-interactive — using demo credentials for user '{user}'")
+
+    db  = core.paths["data_dir"] / "auth.db"
     reg = registerUser(user, bytearray(mp.encode()), db)
     if reg.get("status") == "registered":
         print("Registered new user.")
     else:
         print("Register:", reg.get("message", reg))
 
-    pw = bytearray(getpass("Login password (same as account): ").encode())
+    pw = bytearray((args.demo_password or mp).encode()) if (not interactive or args.demo_password) \
+        else bytearray(getpass("Login password (same as account): ").encode())
     auth = core.login(user, pw)
     if not auth.get("authenticated"):
         print("Login failed:", auth)
@@ -181,7 +194,7 @@ def main() -> int:
     if args.student:
         return run_student_demo(args.student)
     if args.headless:
-        run_headless_demo()
+        run_headless_demo(args)
         return 0
     return run_full_app()
 

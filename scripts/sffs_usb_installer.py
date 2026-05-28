@@ -233,7 +233,8 @@ class Installer:
             if dst.exists():
                 shutil.rmtree(dst)
             shutil.copytree(src, dst, ignore=shutil.ignore_patterns(
-                "__pycache__", "*.pyc", "test_output", ".git", "*.egg-info"
+                "__pycache__", "*.pyc", "test_output", ".git", "*.egg-info",
+                "google_client_secret.json",
             ))
             self.log(f"  Copied {dirname}/", "OK")
 

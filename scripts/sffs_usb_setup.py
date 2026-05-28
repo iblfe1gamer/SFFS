@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 SFFS USB setup helper â€” list removable drives, optional copy, verify tree.

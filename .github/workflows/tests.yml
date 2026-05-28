@@ -23,7 +23,7 @@ jobs:
           # cannot run headless in CI. Threshold of 55% applies to the
           # CI-testable core (crypto + security + worker modules).
           pytest tests -q --cov=code1 --cov=code2 --cov=main-code --cov-fail-under=54
-          python sffs_usb_setup.py --verify
+          python scripts/sffs_usb_setup.py --verify
       - name: Verify secure mode fails closed without AppArmor marker
         run: |
           if python main-code/main.py --secure-required --test; then

@@ -135,8 +135,9 @@ def test_tampered_sffs_raises_security_error(tmp_path: Path) -> None:
     encryptFile(plain, aes_key, sffs)
 
     raw = bytearray(sffs.read_bytes())
-    # Flip a byte deep in the ciphertext (after the 58-byte header)
-    raw[80] ^= 0xFF
+    # V3 header for .bin = 4+1+12+32+8+1+4+32 = 94 bytes; ciphertext starts at 94.
+    # Flip a byte well inside the ciphertext so GCM auth tag fails.
+    raw[150] ^= 0xFF
     sffs.write_bytes(raw)
 
     with pytest.raises(SecurityError):

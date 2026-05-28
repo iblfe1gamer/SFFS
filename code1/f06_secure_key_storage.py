@@ -84,6 +84,7 @@ def secureKeyStorage(
     output_dir: Path,
     key_id: str = None,
     kdf: str = "ARGON2ID",
+    rng_func=None,
 ) -> dict:
     """
     Securely store an RSA private key using PBKDF2 + AES-256-GCM.
@@ -93,6 +94,9 @@ def secureKeyStorage(
         master_password: User's master password (will be derived to key)
         output_dir: Directory to store keystore JSON file
         key_id: Optional key identifier. If None, generates from private key bytes
+        rng_func: Optional callable(n) -> bytes for salt/IV generation.
+                  Defaults to get_random_bytes. Pass session_random_bytes
+                  to mix in mouse-movement entropy collected before key gen.
 
     Returns:
         dict with:
@@ -103,10 +107,12 @@ def secureKeyStorage(
     Raises:
         ValueError: If key_id is provided but too long
     """
+    _rng = rng_func if rng_func is not None else get_random_bytes
+
     # Generate random salt (16 bytes)
     # Why: Salt prevents rainbow table attacks
     # Each key store must have a unique salt
-    salt = get_random_bytes(16)
+    salt = _rng(16)
 
     # Derive AES key from password (Argon2id default, PBKDF2 compatibility mode).
     if kdf.upper() == "ARGON2ID":
@@ -133,7 +139,7 @@ def secureKeyStorage(
         raise ValueError(f"Unsupported KDF: {kdf}")
 
     # Generate random IV for GCM mode
-    iv = get_random_bytes(12)  # GCM nonce is 12 bytes minimum
+    iv = _rng(12)  # GCM nonce is 12 bytes minimum
 
     # Copy the private key into a mutable bytearray so we can zero it explicitly
     # after encryption.  The original `private_key_bytes` argument is `bytes`

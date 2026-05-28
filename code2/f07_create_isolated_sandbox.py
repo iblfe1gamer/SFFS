@@ -32,14 +32,39 @@ import time
 import uuid
 from pathlib import Path
 
-# WHY: pathlib is used for cross-platform path handling — avoids Windows/Linux separator issues
-from pathlib import Path
-# WHY: stat is used to set restrictive file permissions programmatically
-import stat
-# WHY: platform detects Windows vs Linux for different permission models
-import platform
-# WHY: time is needed for lock file timestamp
-import time
+
+
+def _wipe_stale_sandboxes(base_path: Path) -> None:
+    """
+    Wipe all sandbox_<id> directories left over from crashed/unclean sessions.
+
+    Called at the start of createIsolatedSandbox so crash-leftover dirs
+    (which contain decrypted plaintext) are securely erased before any new
+    session begins.  Active sandbox detection: a sandbox is considered stale
+    if its lock file is absent or more than 24 h old.
+    """
+    import datetime
+    cutoff = 24 * 3600  # seconds
+    if not base_path.exists():
+        return
+    for candidate in base_path.iterdir():
+        if not candidate.is_dir() or not candidate.name.startswith("sandbox_"):
+            continue
+        lock = candidate / "sandbox.lock"
+        stale = True
+        if lock.exists():
+            try:
+                age = time.time() - lock.stat().st_mtime
+                if age < cutoff:
+                    stale = False  # likely an active session — leave it
+            except OSError:
+                pass
+        if stale:
+            try:
+                secureWipeDirectory(candidate)
+                shutil.rmtree(candidate, ignore_errors=True)
+            except Exception:
+                pass  # best-effort; log would require core context
 
 
 def createIsolatedSandbox(base_path: Path, session_id: str = None) -> dict:
@@ -61,6 +86,10 @@ def createIsolatedSandbox(base_path: Path, session_id: str = None) -> dict:
     Raises:
         RuntimeError: If sandbox creation fails (permissions denied)
     """
+    # Wipe stale sandboxes from previous crashed/unclean sessions BEFORE creating
+    # the new one — ensures no plaintext lingers on disk across session boundaries.
+    _wipe_stale_sandboxes(base_path)
+
     # Generate session_id if not provided
     if session_id is None:
         session_id = str(uuid.uuid4())
@@ -285,6 +314,29 @@ def secureWipeDirectory(directory: Path) -> None:
             except OSError:
                 # Directory not empty or permission denied
                 pass
+
+
+def secureWipeFile(file_path: Path) -> None:
+    """
+    Securely wipe a single file using DOD 5220.22-M 3-pass standard.
+
+    Same 3-pass overwrite as secureWipeDirectory but for one file.
+    Safe to call if the file does not exist.
+    """
+    if not file_path.exists() or not file_path.is_file():
+        return
+    try:
+        file_size = file_path.stat().st_size
+    except OSError:
+        return
+    if file_size > 0:
+        _write_and_sync(file_path, bytearray(file_size))                  # pass 1: zeros
+        _write_and_sync(file_path, bytearray(b'\xff' * file_size))        # pass 2: ones
+        _write_and_sync(file_path, bytearray(os.urandom(file_size)))      # pass 3: random
+    try:
+        file_path.unlink()
+    except OSError:
+        pass
 
 
 def isSandboxIntact(sandbox_path: Path) -> bool:

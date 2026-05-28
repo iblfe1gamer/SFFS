@@ -103,8 +103,8 @@ def _assert_keystore_encrypted(local_path: Path) -> None:
     """
     try:
         data = json.loads(local_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        # Not a keystore JSON — allow upload (might be another file type)
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        # Not a keystore JSON (binary file, bad encoding, etc.) — allow upload
         return
     # Only enforce for files that look like keystores (have "version" field)
     if "version" not in data:

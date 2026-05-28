@@ -39,7 +39,7 @@ from f03_decrypt_file import SecurityError
 from f04_generate_hash import generateHash
 from f06_secure_key_storage import secureKeyStorage, wrapAESKey, verifyKeystorePassword
 from wrap_store import WrapStore
-from f07_create_isolated_sandbox import createIsolatedSandbox, destroySandbox
+from f07_create_isolated_sandbox import createIsolatedSandbox, destroySandbox, secureWipeFile
 from f09_authenticate_user import authenticateUser, initAuthDatabase, terminateSession
 from f10_monitor_process import ProcessMonitor
 from f11_write_audit_log import AuditLogger
@@ -49,6 +49,7 @@ from f08_secure_memory_wipe import secureMemoryWipe
 from f16_cloud_sync import cloudSync
 from f17_config_loader import configLoader
 from mouse_entropy import session_random_bytes
+from provenance_table import ProvenanceTable
 
 
 class ConfigValidator:
@@ -103,6 +104,11 @@ class SFFSCore:
         self._active_viewers: set[int] = set()
         self._wrap_store: Optional[WrapStore] = None
         self._entropy_mode: str = "silent"
+        self._provenance_table: Optional[ProvenanceTable] = None
+        # decrypted_path (str) → {hash_pre, source_sffs, decrypted_at}
+        self._decrypted_registry: dict[str, dict] = {}
+        self._watcher_thread: Optional[threading.Thread] = None
+        self._watcher_stop = threading.Event()
 
     def _derive_wrap_key(self, password: str) -> bytes:
         """Derive 32-byte AES key for WrapStore from session password + stored salt."""
@@ -215,6 +221,14 @@ class SFFSCore:
             wrap_db_path = self.paths["keys_dir"] / "wrap_store.db"
             self._wrap_store = WrapStore(wrap_db_path, wrap_key)
             self._wrap_store.initialize()
+            prov_path = self.paths["data_dir"] / "provenance.json"
+            # _session_password is guaranteed set above (line 203)
+            self._provenance_table = ProvenanceTable(
+                prov_path, self._session_password.decode("utf-8")
+            )
+            # Start sandbox watcher — wipes any file placed in decrypted_dir
+            # that wasn't put there by this SFFS session.
+            self._start_sandbox_watcher(Path(self.sandbox["decrypted_dir"]))
             if self.logger:
                 self.logger.log(
                     "User login",
@@ -241,8 +255,11 @@ class SFFSCore:
         if self._session_password is not None:
             secureMemoryWipe(self._session_password)
             self._session_password = None
+        self._stop_sandbox_watcher()
         self._wrap_store = None
+        self._provenance_table = None
         self._decrypt_cache.clear()
+        self._decrypted_registry.clear()
         if self.logger:
             self.logger.log("User logout", "INFO", module="SFFSCore", user_id=self._user_id)
         self.session_token = None
@@ -267,7 +284,12 @@ class SFFSCore:
         pub = candidates[0] if candidates else None
         if pub is None:
             g = generateKeyPairs(keys_dir, key_size=2048)
-            secureKeyStorage(g["private_key_bytes"], master_password, keys_dir)
+            secureKeyStorage(
+                g["private_key_bytes"],
+                master_password,
+                keys_dir,
+                rng_func=session_random_bytes,
+            )
             pub = g["public_key_path"]
         else:
             # Match keystore by key_id extracted from public key filename.
@@ -303,6 +325,11 @@ class SFFSCore:
         # Hides file type from directory listings.
         out_sffs = input_path.with_suffix(".sffs")
         enc = encryptFile(input_path, aes_key, out_sffs)
+        # Register provenance token — maps hash_pre → token so decryption can verify
+        if self._provenance_table is not None and enc.get("file_token"):
+            self._provenance_table.register(
+                enc["hash_pre"], enc["file_token"], out_sffs
+            )
         wrapped = wrapAESKey(aes_key, pub, bound_file_path=out_sffs)
         assert self._wrap_store is not None, "WrapStore not initialized — login required"
         self._wrap_store.store(out_sffs, wrapped, self._user_id)
@@ -368,11 +395,119 @@ class SFFSCore:
                 metadata={"out": str(out), "via_worker": True},
             )
         self._decrypt_cache[str(sffs_path.resolve())] = out
+        # Register in decrypted-file registry for validate_before_open checks
+        hash_pre = dec.get("hash_pre") or self._read_sffs_hash_pre(sffs_path)
+        if hash_pre:
+            self._decrypted_registry[str(out.resolve())] = {
+                "hash_pre": hash_pre,
+                "source_sffs": str(sffs_path.resolve()),
+                "decrypted_at": time.time(),
+            }
         return {
             "output_path": out,
             "integrity": "verified",
             "status": "decrypted",
         }
+
+    def _start_sandbox_watcher(self, decrypted_dir: Path) -> None:
+        """
+        Background thread: every 2 s scan decrypted_dir for files not placed
+        there by this session (_decrypted_registry).  Any foreign file is
+        immediately secure-wiped and audit-logged.
+
+        This closes Gap 1: an attacker who drops a file into the sandbox
+        directory cannot leave it there — it is destroyed within ~2 s.
+        """
+        self._watcher_stop.clear()
+
+        def _watch() -> None:
+            while not self._watcher_stop.wait(timeout=2.0):
+                if not decrypted_dir.exists():
+                    continue
+                try:
+                    for f in list(decrypted_dir.iterdir()):
+                        if not f.is_file():
+                            continue
+                        if str(f.resolve()) not in self._decrypted_registry:
+                            # Foreign file — wipe and log
+                            try:
+                                secureWipeFile(f)
+                            except Exception:
+                                try:
+                                    f.unlink(missing_ok=True)
+                                except Exception:
+                                    pass
+                            if self.logger:
+                                self.logger.log(
+                                    f"Foreign file wiped from sandbox: {f.name}",
+                                    "WARN",
+                                    module="SandboxWatcher",
+                                    user_id=self._user_id,
+                                    metadata={"path": str(f)},
+                                )
+                except Exception:
+                    pass  # directory may be mid-creation or already destroyed
+
+        self._watcher_thread = threading.Thread(
+            target=_watch, daemon=True, name="sffs-sandbox-watcher"
+        )
+        self._watcher_thread.start()
+
+    def _stop_sandbox_watcher(self) -> None:
+        self._watcher_stop.set()
+        if self._watcher_thread is not None:
+            self._watcher_thread.join(timeout=5.0)
+            self._watcher_thread = None
+
+    def validate_before_open(self, decrypted_path: Path) -> None:
+        """
+        Pre-launch integrity gate called by sandbox_viewer before opening a file.
+
+        Checks:
+          1. File was decrypted by this SFFS session (in registry).
+          2. File hash still matches hash_pre from encrypt time (no post-decrypt tampering).
+
+        On failure: secure-wipes the file (foreign or tampered file has no place in sandbox),
+        removes it from registry if present, then raises SecurityError.
+
+        Raises:
+            SecurityError: if either check fails.
+        """
+        from f03_decrypt_file import SecurityError as _SE
+
+        def _wipe_and_raise(path: Path, msg: str) -> None:
+            try:
+                secureWipeFile(path)
+            except Exception:
+                try:
+                    path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            self._decrypted_registry.pop(str(path.resolve()), None)
+            if self.logger:
+                self.logger.log(
+                    f"validate_before_open wiped: {path.name}",
+                    "ERROR",
+                    module="SFFSCore",
+                    user_id=self._user_id,
+                    metadata={"path": str(path), "reason": msg},
+                )
+            raise _SE(msg)
+
+        p = Path(decrypted_path).resolve()
+        key = str(p)
+        entry = self._decrypted_registry.get(key)
+        if entry is None:
+            _wipe_and_raise(
+                p,
+                f"File not in SFFS decrypted registry — open blocked: {p.name}",
+            )
+        actual_hash = hashlib.sha256(p.read_bytes()).hexdigest()
+        if actual_hash != entry["hash_pre"]:
+            _wipe_and_raise(
+                p,
+                f"Hash mismatch for {p.name} — possible post-decrypt tampering",
+            )
 
     def _decrypt_via_worker(
         self,
@@ -388,6 +523,17 @@ class SFFSCore:
         # SECURITY: master_password intentionally excluded from CLI payload.
         # It is passed via stdin pipe so it never appears in the process argument
         # list (visible via tasklist /V, /proc/<pid>/cmdline, or audit logs).
+
+        # Look up the expected provenance token so the worker can verify it
+        # after decryption.  Empty string = V2 legacy file or not yet registered.
+        expected_token_hex = ""
+        if self._provenance_table is not None:
+            hash_pre = self._read_sffs_hash_pre(sffs_path)
+            if hash_pre is not None:
+                tok = self._provenance_table.lookup(hash_pre)
+                if tok is not None:
+                    expected_token_hex = tok.hex()
+
         payload = {
             "sffs_path": str(sffs_path),
             "wrap_data_b64": base64.b64encode(wrap_data).decode("ascii"),
@@ -395,6 +541,7 @@ class SFFSCore:
             "output_dir": str(output_dir),
             "sandbox_root": str(sandbox_root) if sandbox_root else "",
             "is_external_output": is_external,
+            "expected_token_hex": expected_token_hex,
         }
         envelope = self._sign_worker_payload(payload)
         _win_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -454,6 +601,22 @@ class SFFSCore:
         sig = hmac.new(self._ipc_secret.encode("utf-8"), msg.encode("utf-8"), hashlib.sha256).hexdigest()
         envelope["signature"] = sig
         return envelope
+
+    @staticmethod
+    def _read_sffs_hash_pre(sffs_path: Path) -> str | None:
+        """
+        Read hash_pre from .sffs header without decrypting.
+
+        Layout: Magic(4) + Version(1) + IV(12) = 17 bytes, then HashPre(32).
+        Returns hex string or None if file is too small / not SFFS.
+        """
+        try:
+            data = sffs_path.read_bytes()
+            if len(data) < 49 or data[:4] != b"SFFS":
+                return None
+            return data[17:49].hex()
+        except OSError:
+            return None
 
     def _terminate_active_workers(self) -> None:
         with self._workers_lock:
@@ -536,6 +699,59 @@ class SFFSCore:
         if self.logger:
             self.logger.log("Cloud key backup", "INFO", module="SFFSCore", user_id=self._user_id)
         return res
+
+    def restoreKeysFromCloud(
+        self, file_id: str, config_dir: Path, keys_dir: Path
+    ) -> dict:
+        """
+        Download sffs_keys_backup.zip from Google Drive and extract to keys_dir.
+
+        Called on a fresh USB *before* login — no active session required.
+        After this returns {"status": "restored"}, the user can log in normally
+        and decrypt their .sffs files (which must be sourced separately).
+
+        Args:
+            file_id:    Drive file ID of the backup zip (from cloudSync "list").
+            config_dir: Directory holding google_token.json (OAuth token).
+            keys_dir:   Destination for extracted key files (sffs_data/keys/).
+
+        Returns:
+            Status dict with keys: status, keys_dir (on success) or message (on failure).
+        """
+        import tempfile
+
+        tmp = Path(tempfile.mktemp(suffix=".zip"))
+        try:
+            result = cloudSync(
+                "download",
+                file_id=file_id,
+                local_path=tmp,
+                config_dir=config_dir,
+            )
+            if result.get("status") != "downloaded":
+                return result
+            keys_dir = Path(keys_dir)
+            keys_dir.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(tmp) as zf:
+                # Security: only extract safe relative paths — no absolute or traversal
+                for member in zf.namelist():
+                    member_path = Path(member)
+                    if member_path.is_absolute() or ".." in member_path.parts:
+                        return {
+                            "status": "error",
+                            "message": f"Unsafe path in backup zip: {member}",
+                        }
+                zf.extractall(keys_dir)
+            if self.logger:
+                self.logger.log(
+                    "Cloud key restore",
+                    "INFO",
+                    module="SFFSCore",
+                    user_id="pre-login",
+                )
+            return {"status": "restored", "keys_dir": str(keys_dir)}
+        finally:
+            tmp.unlink(missing_ok=True)
 
     def shutdown(self) -> None:
         self._terminate_active_workers()

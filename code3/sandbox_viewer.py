@@ -40,7 +40,7 @@ def _decode_text_preview(data: bytes) -> str | None:
         except UnicodeDecodeError:
             continue
         if not text:
-            return text
+            continue
         printable = sum(ch.isprintable() or ch in "\r\n\t" for ch in text)
         ratio = printable / len(text)
         if ratio >= 0.9:
@@ -77,9 +77,37 @@ def _launch_with_policy(parent, path: Path) -> bool:
             sys.path.insert(0, str(code2_root))
         from secure_app_launcher import launch_sandbox_file  # type: ignore
 
+    core = getattr(parent, "_core", None)
+    # Pass the session's actual decrypted_dir so per-session sandbox paths
+    # (sandbox/sandbox_<id>/decrypted/) pass the launcher policy check.
+    allowed_root = None
+    if core is not None:
+        sb = getattr(core, "sandbox", None) or {}
+        _dec = sb.get("decrypted_dir")
+        if _dec:
+            allowed_root = Path(_dec)
+
+    # Pre-launch integrity gate: verify file is in the decrypted registry and
+    # its hash still matches what was stored at decrypt time.
+    if core is not None and hasattr(core, "validate_before_open"):
+        try:
+            core.validate_before_open(path)
+        except Exception as voe:
+            _audit(
+                parent,
+                "Pre-launch validation failed",
+                "ERROR",
+                {"path": str(path), "reason": str(voe)},
+            )
+            QMessageBox.critical(
+                parent,
+                "Open Blocked",
+                f"Pre-launch integrity check failed:\n{voe}",
+            )
+            return False
+
     try:
-        res = launch_sandbox_file(path, wait=False)
-        core = getattr(parent, "_core", None)
+        res = launch_sandbox_file(path, wait=False, allowed_root=allowed_root)
         if core is not None and hasattr(core, "register_external_viewer_pid"):
             try:
                 core.register_external_viewer_pid(int(res.get("pid")))

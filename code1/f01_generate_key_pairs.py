@@ -39,9 +39,7 @@ from cryptography.hazmat.primitives.serialization import (
 )
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.backends import default_backend
 from pathlib import Path
-import secrets
 import hashlib
 import datetime
 
@@ -84,7 +82,6 @@ def generateKeyPairs(output_dir: Path, key_size: int = 2048) -> dict:
     key = rsa.generate_private_key(
         public_exponent=65537,
         key_size=key_size,
-        backend=default_backend(),
     )
 
     # Export public key to PEM format (safe to share, human-readable)

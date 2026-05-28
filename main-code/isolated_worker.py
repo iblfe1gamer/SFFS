@@ -174,7 +174,18 @@ def _action_decrypt(payload: dict, master_password: str) -> dict:
         master_password,
         expected_sffs_path=sffs_path,
     )
-    dec = decryptFile(sffs_path, aes_key, output_dir)
+
+    # Look up expected provenance token from payload (provided by SFFSCore from
+    # the provenance table).  Empty string means V2 file or token not registered.
+    expected_token_hex = payload.get("expected_token_hex", "")
+    expected_token: bytes | None = None
+    if expected_token_hex:
+        try:
+            expected_token = bytes.fromhex(expected_token_hex)
+        except ValueError:
+            expected_token = None
+
+    dec = decryptFile(sffs_path, aes_key, output_dir, expected_token=expected_token)
     vr = verifyHash(dec["hash_pre"], dec["hash_post"])
     if not vr.get("match"):
         outp = Path(dec["output_path"])
@@ -182,11 +193,16 @@ def _action_decrypt(payload: dict, master_password: str) -> dict:
             outp.unlink()
         raise SecurityError(vr.get("message", "Integrity verification failed"))
 
-    return {
+    result: dict = {
         "output_path": str(Path(dec["output_path"]).resolve()),
+        "hash_pre": dec["hash_pre"],
         "integrity": "verified",
         "status": "decrypted",
     }
+    ft = dec.get("file_token")
+    if ft:
+        result["file_token_hex"] = ft.hex()
+    return result
 
 
 def _nonce_purge_loop() -> None:

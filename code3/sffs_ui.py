@@ -1155,6 +1155,16 @@ class SettingsPage(QWidget):
         self._cloud_btn.setEnabled(core is not None)
         self._cloud_btn.clicked.connect(self._do_cloud)
         cloud_card.body.addWidget(self._cloud_btn)
+
+        self._restore_btn = QPushButton("⬇  Restore Keys from Cloud")
+        self._restore_btn.setFixedHeight(36)
+        self._restore_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._restore_btn.setToolTip(
+            "Lost your USB? Download your backed-up keys from Google Drive\n"
+            "to restore decryption capability on this USB."
+        )
+        self._restore_btn.clicked.connect(self._do_restore)
+        cloud_card.body.addWidget(self._restore_btn)
         root.addWidget(cloud_card)
 
         root.addStretch()
@@ -1225,6 +1235,162 @@ class SettingsPage(QWidget):
         self._auth_worker.finished.connect(_on_done)
         self._auth_worker.start()
         dlg.exec()
+
+    def _do_restore(self) -> None:
+        """Restore keys from Google Drive to this USB (no active session needed)."""
+        from f16_cloud_sync import authenticateGoogleDrive, cloudSync, loadCredentials
+
+        # Resolve config/keys dirs — use core paths if logged in, else sffs_data defaults
+        if self._core and self._core.paths:
+            config_dir = self._core.paths["config_dir"]
+            keys_dir = self._core.paths["keys_dir"]
+        else:
+            from f13_init_drive_detection import initDriveDetection
+            paths = initDriveDetection()
+            config_dir = paths["config_dir"]
+            keys_dir = paths["keys_dir"]
+
+        # Ensure authenticated
+        creds = loadCredentials(config_dir)
+        if creds is None or not creds.valid:
+            reply = QMessageBox.question(
+                self, "Connect to Google Drive",
+                "Restoring keys requires Google sign-in.\nOpen browser to connect?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                authenticateGoogleDrive(config_dir)
+            except Exception as e:
+                QMessageBox.critical(self, "Auth Failed", str(e))
+                return
+
+        # List available backups
+        lst = cloudSync("list", config_dir=config_dir)
+        if lst.get("status") != "ok":
+            QMessageBox.warning(self, "Cloud Restore", f"Could not list backups:\n{lst.get('message', lst)}")
+            return
+
+        files = lst.get("files", [])
+        if not files:
+            QMessageBox.information(self, "Cloud Restore", "No backups found in SFFS_Backup on Google Drive.")
+            return
+
+        # Build selection dialog
+        from PyQt6.QtWidgets import QDialog, QListWidget, QListWidgetItem, QDialogButtonBox
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Restore Keys from Cloud")
+        dlg.setMinimumWidth(480)
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(QLabel("Select a backup to restore:"))
+        lst_widget = QListWidget()
+        for f in files:
+            item = QListWidgetItem(f"{f['name']}   ({f.get('modified','')[:10]}   {int(f.get('size') or 0)//1024} KB)")
+            item.setData(Qt.ItemDataRole.UserRole, f["file_id"])
+            lst_widget.addItem(item)
+        lst_widget.setCurrentRow(0)
+        layout.addWidget(lst_widget)
+
+        warn = QLabel(
+            "Your .sffs encrypted files must be placed on this USB separately.\n"
+            "Keys alone restore decryption capability — not the files themselves."
+        )
+        warn.setWordWrap(True)
+        warn.setStyleSheet("color: #f28b82; font-size: 12px;")
+        layout.addWidget(warn)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        selected = lst_widget.currentItem()
+        if selected is None:
+            return
+        file_id = selected.data(Qt.ItemDataRole.UserRole)
+
+        # Confirm overwrite if keys already exist
+        if keys_dir.exists() and any(keys_dir.iterdir()):
+            reply = QMessageBox.warning(
+                self, "Overwrite Keys?",
+                f"Keys already exist in:\n{keys_dir}\n\nOverwrite with cloud backup?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        # Run restore in background thread
+        from PyQt6.QtCore import QThread, pyqtSignal
+        from PyQt6.QtWidgets import QProgressDialog
+
+        core = self._core
+
+        class _RestoreWorker(QThread):
+            finished = pyqtSignal(dict)
+
+            def __init__(self, fid, cfg, kdir):
+                super().__init__()
+                self._fid = fid
+                self._cfg = cfg
+                self._kdir = kdir
+
+            def run(self):
+                if core is not None:
+                    result = core.restoreKeysFromCloud(self._fid, self._cfg, self._kdir)
+                else:
+                    # No core instance — use cloudSync directly
+                    import zipfile, tempfile
+                    from pathlib import Path as _Path
+                    tmp = _Path(tempfile.mktemp(suffix=".zip"))
+                    try:
+                        r = cloudSync("download", file_id=self._fid, local_path=tmp, config_dir=self._cfg)
+                        if r.get("status") != "downloaded":
+                            self.finished.emit(r)
+                            return
+                        self._kdir.mkdir(parents=True, exist_ok=True)
+                        with zipfile.ZipFile(tmp) as zf:
+                            for member in zf.namelist():
+                                from pathlib import PurePosixPath
+                                if PurePosixPath(member).is_absolute() or ".." in member:
+                                    self.finished.emit({"status": "error", "message": f"Unsafe path: {member}"})
+                                    return
+                            zf.extractall(self._kdir)
+                        result = {"status": "restored", "keys_dir": str(self._kdir)}
+                    finally:
+                        tmp.unlink(missing_ok=True)
+                    self.finished.emit(result)
+                    return
+                self.finished.emit(result)
+
+        self._restore_worker = _RestoreWorker(file_id, config_dir, keys_dir)
+        prog = QProgressDialog("Downloading keys from Google Drive...", None, 0, 0, self)
+        prog.setWindowTitle("Restoring Keys")
+        prog.setWindowModality(Qt.WindowModality.WindowModal)
+        self._restore_prog = prog
+
+        def _on_restore_done(result):
+            prog.close()
+            if result.get("status") == "restored":
+                QMessageBox.information(
+                    self, "Restore Complete",
+                    f"Keys restored successfully to:\n{result['keys_dir']}\n\n"
+                    "Place your .sffs files on this USB and log in to decrypt them."
+                )
+            else:
+                QMessageBox.critical(
+                    self, "Restore Failed",
+                    f"Could not restore keys:\n{result.get('message', result)}"
+                )
+
+        self._restore_worker.finished.connect(_on_restore_done)
+        self._restore_worker.start()
+        prog.exec()
 
 
 # ── Main dashboard window ──────────────────────────────────────────────────

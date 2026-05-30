@@ -15,7 +15,7 @@
 | 3 | P1-B | Thread encrypt/decrypt ops | `code3/sffs_ui.py` — fixed `_WorkerThread` → `WorkerThread` | 1.5 hr | [x] |
 | 4 | P3-A | Confirm-password field in register flow | `code3/sffs_ui.py LoginWindow._pw2` | 20 min | [x] |
 | 5 | P3-B | Live password policy feedback label | `code3/sffs_ui.py._refresh_policy_hint` | 30 min | [x] |
-| 6 | P2-A | Live security status panel | `code3/sffs_ui.py SecurityPage` 3s timer | 45 min | [x] |
+| 6 | P2-A | Live security status panel | `sffs_core.py _gui_alert_callback` + `main.py set_gui_alert_callback` | 45 min | [x] |
 | 7 | P2-B | Live audit log panel — last 5 events | `code3/sffs_ui.py SecurityPage._refresh_logs` 3s timer | 30 min | [x] |
 | 8 | P2-C | User-friendly error messages | `code3/sffs_ui.py._friendly_error_str` | 20 min | [x] |
 | 9 | P2-E | End session vs Logout button fix | `code3/sffs_ui.py SFFSWindow._do_logout/_do_emergency_end_session` | 30 min | [x] |
@@ -238,7 +238,7 @@ def handle_logout() -> None:
 [x] 3.  P1-B  Thread encrypt/decrypt — WorkerThread wired; fixed _WorkerThread naming bug
 [x] 4.  P3-A  Confirm-password field — _pw2 field in LoginWindow, checked in _try_register
 [x] 5.  P3-B  Live policy feedback — _refresh_policy_hint on textChanged, red/green
-[x] 6.  P2-A  Live security status panel — SecurityPage 3s auto-refresh + showSecurityAlert
+[x] 6.  P2-A  Live security status panel — _gui_alert_callback in SFFSCore; real threats + USB removal update UI before emergencyLock; setattr hack removed
 [x] 7.  P2-B  Live audit log panel — _refresh_logs on 3s timer, last 10 events
 [x] 8.  P2-C  Friendly error messages — _friendly_error_str maps all exception types
 [x] 9.  P2-E  End session vs Logout — TopBar end_session = wipe, Sidebar logout = graceful

@@ -11,7 +11,7 @@ import secure_app_launcher as sal
 
 
 def _write_tree(root: Path, rel: str) -> None:
-    p = root / rel.replace("/", "\\")
+    p = root / Path(rel)  # pathlib handles / on all platforms; backslash replace breaks Linux
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(b"\x4d\x5a\x00")  # minimal stub; launcher only checks exists()
 

@@ -102,3 +102,30 @@ def test_emergency_lock_wipes_sandbox(tmp_path: Path) -> None:
 def test_process_monitor_callable() -> None:
     assert isinstance(isDebuggerPresent(), bool)
     assert isinstance(checkSuspiciousProcesses(), list)
+
+
+def test_auth_timing_constant_for_unknown_username(tmp_path: Path) -> None:
+    import time
+    db = tmp_path / "timing.db"
+    initAuthDatabase(db)
+    registerUser("knownuser", bytearray(b"ValidPass1!XY"), db)
+    # warm up both paths
+    authenticateUser("knownuser", bytearray(b"WrongPass1!XY"), db)
+    authenticateUser("unknownxyz", bytearray(b"AnyPassword1!"), db)
+    N = 3
+    known_times = []
+    for _ in range(N):
+        t0 = time.perf_counter()
+        authenticateUser("knownuser", bytearray(b"WrongPass1!XY"), db)
+        known_times.append(time.perf_counter() - t0)
+    unknown_times = []
+    for _ in range(N):
+        t0 = time.perf_counter()
+        authenticateUser("unknownxyz", bytearray(b"AnyPassword1!"), db)
+        unknown_times.append(time.perf_counter() - t0)
+    avg_known = sum(known_times) / N
+    avg_unknown = sum(unknown_times) / N
+    diff = abs(avg_known - avg_unknown)
+    assert diff < 0.2, (
+        f"Timing oracle: known={avg_known:.3f}s unknown={avg_unknown:.3f}s diff={diff:.3f}s > 200ms"
+    )

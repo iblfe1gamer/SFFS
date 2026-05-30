@@ -182,6 +182,7 @@ def authenticateUser(username: str, password: bytearray, db_path: Path) -> dict:
         - Strings are immutable and interned
         - This prevents accidental memory exposure
     """
+    pw = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4)
     conn = sqlite3.connect(str(db_path))
     cursor = conn.cursor()
     now = datetime.now().isoformat()
@@ -227,7 +228,6 @@ def authenticateUser(username: str, password: bytearray, db_path: Path) -> dict:
             }
 
         password_str = password.decode("utf-8")
-        pw = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4)
         try:
             is_valid = pw.verify(password_hash, password_str)
         except VerifyMismatchError:

@@ -219,7 +219,7 @@ class SFFSCore:
             finally:
                 del _pw_str
             wrap_db_path = self.paths["keys_dir"] / "wrap_store.db"
-            self._wrap_store = WrapStore(wrap_db_path, wrap_key)
+            self._wrap_store = WrapStore(wrap_db_path, wrap_key, tmp_dir=Path(self.sandbox["temp_dir"]))
             self._wrap_store.initialize()
             prov_path = self.paths["data_dir"] / "provenance.json"
             # _session_password is guaranteed set above (line 203)

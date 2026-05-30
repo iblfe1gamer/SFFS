@@ -139,6 +139,10 @@ def createIsolatedSandbox(base_path: Path, session_id: str = None) -> dict:
     decrypted_dir.mkdir(parents=True, exist_ok=True)
     temp_dir.mkdir(parents=True, exist_ok=True)
     keys_runtime_dir.mkdir(parents=True, exist_ok=True)
+    if platform.system() == "Linux":
+        os.chmod(decrypted_dir, 0o700)
+        os.chmod(temp_dir, 0o700)
+        os.chmod(keys_runtime_dir, 0o700)
 
     # Write sandbox.lock file containing session_id and timestamp.
     # SECURITY: On Linux, use os.open with mode 0o600 so the lock file is

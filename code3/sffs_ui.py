@@ -23,6 +23,10 @@ from PyQt6.QtCore import (
     Qt, QTimer, QPropertyAnimation, QEasingCurve,
     QSize, pyqtSignal, QThread, pyqtSlot,
 )
+try:
+    from f18_thread_controller import WorkerThread
+except ImportError:
+    WorkerThread = None  # type: ignore[assignment,misc]
 from PyQt6.QtGui import (
     QColor, QDragEnterEvent, QDropEvent,
     QFont, QFontDatabase, QPainter, QPalette,
@@ -227,6 +231,20 @@ QTextEdit {{
 
 # ── Utility widgets ────────────────────────────────────────────────────────
 
+def _friendly_error_str(exc_or_msg) -> str:
+    """Map exception or raw error string to a plain-English message for UI display."""
+    msg = str(exc_or_msg).lower()
+    if "filenotfounderror" in msg or "no such file" in msg or "not found" in msg:
+        return "File not found. Has it been moved?"
+    if "fileexistserror" in msg or "already exists" in msg:
+        return "Output file already exists. Choose a different location."
+    if "securityerror" in msg or "tampered" in msg or "integrity" in msg or "mismatch" in msg:
+        return "File appears tampered — decryption refused."
+    if "session password" in msg or "login again" in msg or "no active session" in msg:
+        return "Session expired. Please log out and log back in."
+    return "Operation failed. Check the audit log for details."
+
+
 def _shadow(radius: int = 16, alpha: int = 80) -> QGraphicsDropShadowEffect:
     fx = QGraphicsDropShadowEffect()
     fx.setBlurRadius(radius)
@@ -407,6 +425,7 @@ class SidebarButton(QPushButton):
 
 class Sidebar(QFrame):
     page_changed = pyqtSignal(int)
+    logout_requested = pyqtSignal()
 
     PAGES = [
         ("🗂", "Files"),
@@ -444,6 +463,13 @@ class Sidebar(QFrame):
             lay.addWidget(btn)
 
         lay.addStretch()
+        lay.addWidget(Divider())
+        lay.addSpacing(4)
+
+        # Graceful logout button at bottom of sidebar
+        logout_btn = SidebarButton("↩", "Logout")
+        logout_btn.clicked.connect(self.logout_requested)
+        lay.addWidget(logout_btn)
 
         # Version tag
         ver = QLabel("v2.0  ·  SFFS")
@@ -805,6 +831,17 @@ class FilesPage(QWidget):
         color = _SECURE if ok else _DANGER
         self._status.setStyleSheet(f"color: {color}; font-size: 12px; border: none; background: transparent;")
         self._status.setText(msg)
+
+    def set_busy(self, busy: bool) -> None:
+        self._enc_btn.setEnabled(not busy)
+        self._dec_btn.setEnabled(not busy)
+        self._disk_btn.setEnabled(not busy)
+        if busy:
+            self._prog.setVisible(True)
+            self._prog.setMaximum(0)  # indeterminate spinner
+        else:
+            self._prog.setMaximum(100)
+            self._prog.setVisible(False)
 
     def _refresh_entropy(self) -> None:
         if self._core is None:
@@ -1434,9 +1471,14 @@ class SFFSWindow(QMainWindow):
         root_lay.setContentsMargins(0, 0, 0, 0)
         root_lay.setSpacing(0)
 
+        # Worker refs — must be instance vars or Qt GCs the thread mid-run
+        self._enc_worker = None
+        self._dec_worker = None
+        self._disk_worker = None
+
         # Top bar
         self._topbar = TopBar(username)
-        self._topbar.end_session.connect(self._do_logout)
+        self._topbar.end_session.connect(self._do_emergency_end_session)
         root_lay.addWidget(self._topbar)
 
         # Content row
@@ -1447,6 +1489,7 @@ class SFFSWindow(QMainWindow):
         # Sidebar
         self._sidebar = Sidebar()
         self._sidebar.page_changed.connect(self._switch_page)
+        self._sidebar.logout_requested.connect(self._do_logout)
         content_row.addWidget(self._sidebar)
 
         # Pages stack
@@ -1480,6 +1523,31 @@ class SFFSWindow(QMainWindow):
         self._topbar.set_page(self.PAGE_TITLES[idx])
 
     def _do_logout(self) -> None:
+        """Graceful logout via sidebar Logout button — wipes sandbox, confirms first."""
+        reply = QMessageBox.question(
+            self, "Logout",
+            "End your session? The sandbox will be securely wiped.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        if self._on_logout:
+            self._on_logout()
+        else:
+            self.close()
+
+    def _do_emergency_end_session(self) -> None:
+        """Emergency wipe via TopBar End session — confirms, then wipes immediately."""
+        reply = QMessageBox.question(
+            self, "End Session",
+            "This will immediately wipe your sandbox and all decrypted files.\n\nContinue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self.showSecurityAlert("MANUAL WIPE — session ended", "CRITICAL")
         if self._on_logout:
             self._on_logout()
         else:
@@ -1509,7 +1577,6 @@ class SFFSWindow(QMainWindow):
         if self._core is None:
             self._files_page.set_status("Demo mode — no core attached", False)
             return
-        # VeraCrypt-style: require entropy collection before proceeding
         try:
             from mouse_entropy import is_entropy_ready
             need_dialog = not is_entropy_ready()
@@ -1520,40 +1587,79 @@ class SFFSWindow(QMainWindow):
             if dlg.exec() != QDialog.DialogCode.Accepted:
                 self._files_page.set_status("Encryption cancelled — entropy collection aborted", False)
                 return
-        try:
-            self._files_page.set_progress(10)
-            result = self._core.encryptFileOperation(Path(path))
-            self._files_page.set_progress(100)
+
+        self._files_page.set_busy(True)
+        self._files_page.set_status("Encrypting…", True)
+
+        def _on_done(result: dict) -> None:
+            self._files_page.set_busy(False)
             out = Path(result.get("sffs_path", path))
             self._files_page.set_status(f"✓ Encrypted → {out.name}", True)
-        except Exception as e:
-            self._files_page.set_status(f"Encrypt failed: {e}", False)
-            QMessageBox.warning(self, "Encrypt failed", str(e))
+            self._vault_page.refresh()
+            if self._core and self._core.logger:
+                self._security_page._refresh_logs()
+
+        def _on_error(err: str) -> None:
+            self._files_page.set_busy(False)
+            msg = _friendly_error_str(err)
+            self._files_page.set_status(f"Encrypt failed: {msg}", False)
+            QMessageBox.warning(self, "Encrypt failed", msg)
+
+        if _WorkerThread is not None:
+            self._enc_worker = _WorkerThread(
+                lambda: self._core.encryptFileOperation(Path(path))
+            )
+            self._enc_worker.signals.result.connect(_on_done)
+            self._enc_worker.signals.error.connect(_on_error)
+            self._enc_worker.start()
+        else:
+            try:
+                _on_done(self._core.encryptFileOperation(Path(path)))
+            except Exception as e:
+                _on_error(str(e))
 
     def _do_decrypt(self, path: str) -> None:
         if self._core is None:
             self._files_page.set_status("Demo mode — no core attached", False)
             return
-        try:
-            self._files_page.set_progress(10)
-            result = self._core.decryptFileOperation(Path(path))
-            self._files_page.set_progress(100)
+
+        self._files_page.set_busy(True)
+        self._files_page.set_status("Decrypting…", True)
+
+        def _on_done(result: dict) -> None:
+            self._files_page.set_busy(False)
             out = Path(result.get("output_path", path))
             self._files_page.set_status(f"✓ Decrypted → sandbox/{out.name}", True)
             self._vault_page.refresh()
-            self._switch_page(1)   # jump to Vault
+            self._switch_page(1)
             self._sidebar._select(1)
-        except Exception as e:
-            self._files_page.set_status(f"Decrypt failed: {e}", False)
-            QMessageBox.warning(self, "Decrypt failed", str(e))
+            if self._core and self._core.logger:
+                self._security_page._refresh_logs()
+
+        def _on_error(err: str) -> None:
+            self._files_page.set_busy(False)
+            msg = _friendly_error_str(err)
+            self._files_page.set_status(f"Decrypt failed: {msg}", False)
+            QMessageBox.warning(self, "Decrypt failed", msg)
+
+        if _WorkerThread is not None:
+            self._dec_worker = _WorkerThread(
+                lambda: self._core.decryptFileOperation(Path(path))
+            )
+            self._dec_worker.signals.result.connect(_on_done)
+            self._dec_worker.signals.error.connect(_on_error)
+            self._dec_worker.start()
+        else:
+            try:
+                _on_done(self._core.decryptFileOperation(Path(path)))
+            except Exception as e:
+                _on_error(str(e))
 
     def _do_decrypt_to_disk(self, sffs_path: str) -> None:
-        """Decrypt a .sffs file and save plaintext directly to a user-chosen disk location."""
         if self._core is None:
             self._files_page.set_status("Demo mode — no core attached", False)
             return
 
-        # Security warning — decrypted file is NOT auto-wiped
         warn = QMessageBox(self)
         warn.setIcon(QMessageBox.Icon.Warning)
         warn.setWindowTitle("⚠ Decrypt to Disk — Security Notice")
@@ -1570,32 +1676,49 @@ class SFFSWindow(QMainWindow):
         if warn.exec() != QMessageBox.StandardButton.Ok:
             return
 
-        # Pick save location
-        stem = Path(sffs_path).stem  # e.g. "report" from "report.sffs"
+        stem = Path(sffs_path).stem
         save_path, _ = QFileDialog.getSaveFileName(
             self, "Save Decrypted File As…", stem, "All Files (*)"
         )
         if not save_path:
             return
 
-        try:
-            self._files_page.set_progress(10)
-            result = self._core.decryptFileOperation(
-                Path(sffs_path), output_path=Path(save_path)
-            )
-            self._files_page.set_progress(100)
+        self._files_page.set_busy(True)
+        self._files_page.set_status("Decrypting to disk…", True)
+
+        def _on_done(result: dict) -> None:
+            self._files_page.set_busy(False)
             out = Path(result.get("output_path", save_path))
             self._files_page.set_status(f"✓ Saved plaintext → {out.name}", True)
             QMessageBox.information(
-                self,
-                "Decrypt to Disk — Done",
+                self, "Decrypt to Disk — Done",
                 f"File saved to:\n{out}\n\n"
                 "Remember: this file is NOT protected by the SFFS sandbox. "
                 "Delete it securely when no longer needed.",
             )
-        except Exception as e:
-            self._files_page.set_status(f"Decrypt to disk failed: {e}", False)
-            QMessageBox.warning(self, "Decrypt to Disk failed", str(e))
+
+        def _on_error(err: str) -> None:
+            self._files_page.set_busy(False)
+            msg = _friendly_error_str(err)
+            self._files_page.set_status(f"Decrypt to disk failed: {msg}", False)
+            QMessageBox.warning(self, "Decrypt to Disk failed", msg)
+
+        if _WorkerThread is not None:
+            self._disk_worker = _WorkerThread(
+                lambda: self._core.decryptFileOperation(
+                    Path(sffs_path), output_path=Path(save_path)
+                )
+            )
+            self._disk_worker.signals.result.connect(_on_done)
+            self._disk_worker.signals.error.connect(_on_error)
+            self._disk_worker.start()
+        else:
+            try:
+                _on_done(self._core.decryptFileOperation(
+                    Path(sffs_path), output_path=Path(save_path)
+                ))
+            except Exception as e:
+                _on_error(str(e))
 
 
 # ── Login window ───────────────────────────────────────────────────────────
@@ -1606,11 +1729,12 @@ class LoginWindow(QDialog):
     def __init__(self, paths: dict, core=None, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("SFFS — Secure Login")
-        self.setFixedSize(420, 560)
+        self.setFixedSize(420, 660)
         self._paths = paths
         self._core = core          # if provided, core.login() is used
         self._token: str | None = None
         self._username: str = ""
+        self._register_mode = False
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -1674,6 +1798,31 @@ class LoginWindow(QDialog):
         self._pw.returnPressed.connect(self._try_login)
         card_lay.addWidget(self._pw)
 
+        # P3-B: live policy feedback
+        self._policy_hint = QLabel("")
+        self._policy_hint.setStyleSheet(
+            f"color: {_TEXT2}; font-size: 10px; border: none; background: transparent;"
+        )
+        self._policy_hint.setWordWrap(True)
+        card_lay.addWidget(self._policy_hint)
+        self._pw.textChanged.connect(self._refresh_policy_hint)
+
+        # P3-A: confirm-password (hidden until register mode)
+        self._pw2_lbl = QLabel("Confirm password")
+        self._pw2_lbl.setStyleSheet(
+            f"color: {_TEXT2}; font-size: 12px; font-weight: 600; border: none; background: transparent;"
+        )
+        self._pw2_lbl.setVisible(False)
+        card_lay.addWidget(self._pw2_lbl)
+
+        self._pw2 = QLineEdit()
+        self._pw2.setPlaceholderText("Re-enter password")
+        self._pw2.setEchoMode(QLineEdit.EchoMode.Password)
+        self._pw2.setFixedHeight(42)
+        self._pw2.setVisible(False)
+        self._pw2.returnPressed.connect(self._try_register)
+        card_lay.addWidget(self._pw2)
+
         self._err = QLabel("")
         self._err.setStyleSheet(f"color: {_DANGER}; font-size: 11px; border: none; background: transparent;")
         self._err.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1699,7 +1848,7 @@ class LoginWindow(QDialog):
             f"QPushButton:hover {{ color: #58a6ff; }}"
         )
         reg_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        reg_btn.clicked.connect(self._try_register)
+        reg_btn.clicked.connect(self._enter_register_mode)
         reg_row.addStretch()
         reg_row.addWidget(reg_lbl)
         reg_row.addWidget(reg_btn)
@@ -1754,19 +1903,45 @@ class LoginWindow(QDialog):
                 self._pw.clear()
                 self._pw.setFocus()
 
+    def _enter_register_mode(self) -> None:
+        if not self._register_mode:
+            self._register_mode = True
+            self._pw2_lbl.setVisible(True)
+            self._pw2.setVisible(True)
+            self._err.setStyleSheet(
+                f"color: {_ACCENT}; font-size: 11px; border: none; background: transparent;"
+            )
+            self._err.setText("Fill confirm password, then click Register account again")
+            self._pw2.setFocus()
+        else:
+            self._try_register()
+
     def _try_register(self) -> None:
         self._inject_paths()
         from f09_authenticate_user import initAuthDatabase, registerUser
         username = self._user.text().strip()
         password = self._pw.text()
         if not username or not password:
+            self._err.setStyleSheet(
+                f"color: {_DANGER}; font-size: 11px; border: none; background: transparent;"
+            )
             self._err.setText("Fill username and password before registering")
+            return
+        if self._pw2.isVisible() and self._pw2.text() != password:
+            self._err.setStyleSheet(
+                f"color: {_DANGER}; font-size: 11px; border: none; background: transparent;"
+            )
+            self._err.setText("Passwords do not match")
+            self._pw2.setFocus()
             return
         db = Path(self._paths["data_dir"]) / "auth.db"
         initAuthDatabase(db)
         try:
             r = registerUser(username, bytearray(password.encode()), db)
         except ValueError as e:
+            self._err.setStyleSheet(
+                f"color: {_DANGER}; font-size: 11px; border: none; background: transparent;"
+            )
             self._err.setText(str(e))
             return
         if r.get("status") == "registered":
@@ -1774,8 +1949,40 @@ class LoginWindow(QDialog):
                 f"color: {_SECURE}; font-size: 11px; border: none; background: transparent;"
             )
             self._err.setText("✓ Account created — click Unlock to log in")
+            self._pw2.setVisible(False)
+            self._pw2_lbl.setVisible(False)
+            self._register_mode = False
         else:
+            self._err.setStyleSheet(
+                f"color: {_DANGER}; font-size: 11px; border: none; background: transparent;"
+            )
             self._err.setText(r.get("message", "Registration failed"))
+
+    def _refresh_policy_hint(self, text: str) -> None:
+        if not text:
+            self._policy_hint.setText("")
+            return
+        issues = []
+        if len(text) < 12:
+            issues.append(f"12+ chars ({len(text)} now)")
+        if not any(c.isupper() for c in text):
+            issues.append("uppercase")
+        if not any(c.islower() for c in text):
+            issues.append("lowercase")
+        if not any(c.isdigit() for c in text):
+            issues.append("digit")
+        if not any(not c.isalnum() for c in text):
+            issues.append("special char")
+        if issues:
+            self._policy_hint.setStyleSheet(
+                f"color: {_DANGER}; font-size: 10px; border: none; background: transparent;"
+            )
+            self._policy_hint.setText("Needs: " + ", ".join(issues))
+        else:
+            self._policy_hint.setStyleSheet(
+                f"color: {_SECURE}; font-size: 10px; border: none; background: transparent;"
+            )
+            self._policy_hint.setText("✓ Password meets policy")
 
     @property
     def session_token(self) -> str | None:

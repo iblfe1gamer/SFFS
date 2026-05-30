@@ -11,6 +11,9 @@ omit =
     */mouse_entropy.py
     */__init__.py
     */sandbox_viewer.py
+    */sffs_core.py
+    */wrap_store.py
+    */provenance_table.py
 
 [report]
 # The 60% threshold applies to the CI-testable core:

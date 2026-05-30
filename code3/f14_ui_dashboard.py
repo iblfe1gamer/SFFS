@@ -435,61 +435,6 @@ class SFSSDashboard(QMainWindow):
         self._logs.setText(lines or "No log lines")
 
 
-class LoginWindow(QDialog):
-    """Collect credentials and call Student 2 ``authenticateUser``."""
-
-    def __init__(self, paths: dict, parent=None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("SFFS Login")
-        self._paths = paths
-        self._token: str | None = None
-        lay = QFormLayout(self)
-        self._user = QLineEdit()
-        self._pw = QLineEdit()
-        self._pw.setEchoMode(QLineEdit.EchoMode.Password)
-        lay.addRow("Username", self._user)
-        lay.addRow("Password", self._pw)
-        btn = QPushButton("Login")
-        lay.addRow(btn)
-        btn.clicked.connect(self._try_login)
-
-    def _inject_code2(self) -> Path:
-        root = Path(__file__).resolve().parent.parent / "code2"
-        if str(root) not in sys.path:
-            sys.path.insert(0, str(root))
-        return root
-
-    def _try_login(self) -> None:
-        self._inject_code2()
-        from f09_authenticate_user import authenticateUser, initAuthDatabase
-
-        db = Path(self._paths["data_dir"]) / "auth.db"
-        initAuthDatabase(db)
-        pw = bytearray(self._pw.text().encode())
-        r = authenticateUser(self._user.text().strip(), pw, db)
-        if r.get("authenticated"):
-            self._token = r.get("session_token")
-            self.accept()
-        else:
-            locked_until = r.get("locked_until")
-            if locked_until:
-                # Distinguish account-lock from wrong password — rate-limit feedback.
-                # QMessageBox.critical (red icon) makes it visually distinct so the
-                # user understands they must wait, not just re-try immediately.
-                QMessageBox.critical(
-                    self,
-                    "Account Locked",
-                    f"Too many failed attempts.\nAccount locked until {locked_until}.\n\n"
-                    "Please wait before trying again.",
-                )
-            else:
-                QMessageBox.warning(self, "Login failed", str(r.get("message", "Invalid credentials")))
-
-    @property
-    def session_token(self) -> str | None:
-        return self._token
-
-
 def uiDashboard(session_token: str, config: dict, paths: dict) -> None:
     """
     Start (or reuse) ``QApplication`` and show the main dashboard.

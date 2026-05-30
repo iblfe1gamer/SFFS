@@ -432,6 +432,7 @@ class Sidebar(QFrame):
         ("🔒", "Vault"),
         ("🛡", "Security"),
         ("⚙", "Settings"),
+        ("📂", "Explorer"),
     ]
 
     def __init__(self, parent=None):
@@ -1430,6 +1431,48 @@ class SettingsPage(QWidget):
         prog.exec()
 
 
+class ExplorerPage(QWidget):
+    """Two-pane file browser scoped to the vault root (f15_file_manager_explorer)."""
+
+    sffs_file_selected = pyqtSignal(str)
+    plain_file_selected = pyqtSignal(str)
+
+    def __init__(self, core=None, parent=None):
+        super().__init__(parent)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 24, 24, 24)
+        root.setSpacing(16)
+
+        hdr = Card("File Explorer")
+        info = QLabel(
+            "Browse files scoped to your vault root. "
+            "Double-click a .sffs file to open it in the sandbox, "
+            "or any other file to encrypt it."
+        )
+        info.setStyleSheet(f"color: {_TEXT2}; font-size: 12px; border: none; background: transparent;")
+        info.setWordWrap(True)
+        hdr.body.addWidget(info)
+        root.addWidget(hdr)
+
+        if core is not None and hasattr(core, "paths") and core.paths:
+            vault_root = Path(core.paths.get("usb_root") or core.paths.get("data_dir", "."))
+        else:
+            vault_root = Path.home()
+
+        try:
+            from f15_file_manager_explorer import FileManagerExplorer
+            self._explorer = FileManagerExplorer(vault_root)
+            self._explorer.sffs_file_selected.connect(self.sffs_file_selected)
+            self._explorer.plain_file_selected.connect(self.plain_file_selected)
+            root.addWidget(self._explorer, 1)
+        except Exception as e:
+            err = QLabel(f"Explorer unavailable: {e}")
+            err.setStyleSheet(f"color: {_DANGER}; border: none; background: transparent;")
+            root.addWidget(err)
+            root.addStretch()
+
+
 # ── Main dashboard window ──────────────────────────────────────────────────
 
 class SFFSWindow(QMainWindow):
@@ -1446,7 +1489,7 @@ class SFFSWindow(QMainWindow):
             └── [3] SettingsPage
     """
 
-    PAGE_TITLES = ["Files", "Vault", "Security", "Settings"]
+    PAGE_TITLES = ["Files", "Vault", "Security", "Settings", "Explorer"]
 
     def __init__(
         self,
@@ -1504,8 +1547,12 @@ class SFFSWindow(QMainWindow):
         self._vault_page = VaultPage(core)
         self._security_page = SecurityPage(core)
         self._settings_page = SettingsPage(core, paths)
+        self._explorer_page = ExplorerPage(core)
+        self._explorer_page.sffs_file_selected.connect(self._do_decrypt)
+        self._explorer_page.plain_file_selected.connect(self._do_encrypt)
 
-        for p in (self._files_page, self._vault_page, self._security_page, self._settings_page):
+        for p in (self._files_page, self._vault_page, self._security_page,
+                  self._settings_page, self._explorer_page):
             self._stack.addWidget(p)
 
         content_row.addWidget(self._stack, 1)
@@ -1605,8 +1652,8 @@ class SFFSWindow(QMainWindow):
             self._files_page.set_status(f"Encrypt failed: {msg}", False)
             QMessageBox.warning(self, "Encrypt failed", msg)
 
-        if _WorkerThread is not None:
-            self._enc_worker = _WorkerThread(
+        if WorkerThread is not None:
+            self._enc_worker = WorkerThread(
                 lambda: self._core.encryptFileOperation(Path(path))
             )
             self._enc_worker.signals.result.connect(_on_done)
@@ -1642,8 +1689,8 @@ class SFFSWindow(QMainWindow):
             self._files_page.set_status(f"Decrypt failed: {msg}", False)
             QMessageBox.warning(self, "Decrypt failed", msg)
 
-        if _WorkerThread is not None:
-            self._dec_worker = _WorkerThread(
+        if WorkerThread is not None:
+            self._dec_worker = WorkerThread(
                 lambda: self._core.decryptFileOperation(Path(path))
             )
             self._dec_worker.signals.result.connect(_on_done)
@@ -1703,8 +1750,8 @@ class SFFSWindow(QMainWindow):
             self._files_page.set_status(f"Decrypt to disk failed: {msg}", False)
             QMessageBox.warning(self, "Decrypt to Disk failed", msg)
 
-        if _WorkerThread is not None:
-            self._disk_worker = _WorkerThread(
+        if WorkerThread is not None:
+            self._disk_worker = WorkerThread(
                 lambda: self._core.decryptFileOperation(
                     Path(sffs_path), output_path=Path(save_path)
                 )

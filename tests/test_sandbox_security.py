@@ -663,6 +663,7 @@ class TestSecurityFixesVerified:
         FIX-5: show_sandbox_file_viewer must validate path is inside sandbox
         before any file I/O.
         """
+        pytest.importorskip("PyQt6.QtWidgets", reason="PyQt6 not available in headless CI")
         import inspect
         import sandbox_viewer as sv
 
@@ -679,6 +680,7 @@ class TestSecurityFixesVerified:
         FIX-5: Viewer must return 'error' when path is outside sandbox decrypted root.
         Uses a mock parent with _core.sandbox set.
         """
+        pytest.importorskip("PyQt6.QtWidgets", reason="PyQt6 not available in headless CI")
         import sandbox_viewer as sv
         import unittest.mock as mock
 
@@ -703,6 +705,7 @@ class TestSecurityFixesVerified:
         """
         FIX-5: Viewer must allow paths inside sandbox decrypted root.
         """
+        pytest.importorskip("PyQt6.QtWidgets", reason="PyQt6 not available in headless CI")
         import sandbox_viewer as sv
         import unittest.mock as mock
 

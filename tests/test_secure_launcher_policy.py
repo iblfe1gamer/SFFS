@@ -87,7 +87,7 @@ def test_core_terminate_active_viewers_invokes_taskkill(monkeypatch: pytest.Monk
         def wait(self, timeout=None):
             return 0
 
-    def fake_popen(cmd, stdout=None, stderr=None):
+    def fake_popen(cmd, stdout=None, stderr=None, **kwargs):
         calls.append(cmd)
         return DummyProc()
 

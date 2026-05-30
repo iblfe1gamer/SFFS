@@ -20,7 +20,7 @@ import shutil
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 SFFS_DATA = ROOT / "sffs_data"
 
 
@@ -120,3 +120,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

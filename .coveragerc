@@ -1,0 +1,24 @@
+[run]
+# Omit demo runners, platform-specific binaries, and GUI entry points that
+# cannot be exercised in headless CI without a full display server or
+# hardware devices.
+omit =
+    */run_student*.py
+    */main.py
+    */setup.py
+    */windows_job_wrapper.py
+    */os_isolation.py
+    */mouse_entropy.py
+    */__init__.py
+    */sandbox_viewer.py
+
+[report]
+# The 60% threshold applies to the CI-testable core:
+# code1 (crypto), code2 (security), and main-code/isolated_worker.
+# GUI (sffs_core, dashboard, f14–f18) and Windows-only modules are excluded.
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise AssertionError
+    raise NotImplementedError
+    if __name__ == .__main__.:

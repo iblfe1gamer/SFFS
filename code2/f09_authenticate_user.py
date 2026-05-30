@@ -182,6 +182,7 @@ def authenticateUser(username: str, password: bytearray, db_path: Path) -> dict:
         - Strings are immutable and interned
         - This prevents accidental memory exposure
     """
+    pw = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4)
     conn = sqlite3.connect(str(db_path))
     cursor = conn.cursor()
     now = datetime.now().isoformat()
@@ -227,14 +228,15 @@ def authenticateUser(username: str, password: bytearray, db_path: Path) -> dict:
             }
 
         password_str = password.decode("utf-8")
-        pw = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4)
         try:
             is_valid = pw.verify(password_hash, password_str)
         except VerifyMismatchError:
             is_valid = False
-
-        # Wipe caller-owned password buffer as soon as verification is done.
-        secureMemoryWipe(password)
+        finally:
+            # WHY finally: guarantees wipe even if pw.verify() raises an unexpected
+            # exception (e.g. argon2.exceptions.VerificationError, MemoryError).
+            # Without finally, any non-VerifyMismatchError propagates and skips wipe.
+            secureMemoryWipe(password)
 
         if not is_valid:
             failed_attempts += 1

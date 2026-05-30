@@ -8,6 +8,10 @@ sffs_data/
 
 # Python caches
 __pycache__/
+
+# Coverage artifacts (generated, not source)
+.coverage
+htmlcov/
 *.pyc
 *.pyo
 .pytest_cache/
@@ -27,6 +31,7 @@ security/
 *.pem
 *.key
 .env*
+code3/google_client_secret.json
 
 # Claude / Obsidian / tool internals
 .claude/
@@ -37,6 +42,11 @@ security/
 test_output/
 scripts/usb-pack/build/
 scripts/usb-pack/dist/
+scripts/build/
+scripts/dist/
+
+# Built executables
+*.exe
 
 # Docs not part of source
 SFFS_audit_report.csv

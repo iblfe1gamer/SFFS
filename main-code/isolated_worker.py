@@ -18,6 +18,7 @@ import os
 import hmac
 import hashlib
 import time
+import threading
 from pathlib import Path
 
 # Ensure sibling student modules import cleanly when invoked directly
@@ -65,7 +66,14 @@ _SYSTEM_PATHS = [
 def _require_not_system_path(path: Path) -> None:
     p = path.resolve()
     for sp in _SYSTEM_PATHS:
-        if sp.exists() and (p == sp or sp in p.parents):
+        # Resolve each system path too so that Windows symlinks (e.g. a junction
+        # pointing into C:\Windows from a user-writable directory) do not bypass
+        # the check.  resolve() is a no-op for paths that don't exist.
+        try:
+            sp_r = sp.resolve()
+        except OSError:
+            sp_r = sp
+        if sp_r.exists() and (p == sp_r or sp_r in p.parents):
             raise PermissionError(f"Output path denied: {path} overlaps with system path")
 
 
@@ -143,12 +151,12 @@ def _policy_guard(
         raise PermissionError("Output directory denied by policy")
 
 
-def _action_decrypt(payload: dict) -> dict:
+def _action_decrypt(payload: dict, master_password: str) -> dict:
     sffs_path = Path(payload["sffs_path"]).resolve()
     keystore_path = Path(payload["keystore_path"]).resolve()
     output_dir = Path(payload["output_dir"]).resolve()
     is_external_output = payload.get("is_external_output", False)
-    master_password = payload["master_password"]
+    # master_password received via stdin, not payload (never in CLI args)
     wrapped = base64.b64decode(payload["wrap_data_b64"])
 
     if is_external_output:
@@ -166,7 +174,18 @@ def _action_decrypt(payload: dict) -> dict:
         master_password,
         expected_sffs_path=sffs_path,
     )
-    dec = decryptFile(sffs_path, aes_key, output_dir)
+
+    # Look up expected provenance token from payload (provided by SFFSCore from
+    # the provenance table).  Empty string means V2 file or token not registered.
+    expected_token_hex = payload.get("expected_token_hex", "")
+    expected_token: bytes | None = None
+    if expected_token_hex:
+        try:
+            expected_token = bytes.fromhex(expected_token_hex)
+        except ValueError:
+            expected_token = None
+
+    dec = decryptFile(sffs_path, aes_key, output_dir, expected_token=expected_token)
     vr = verifyHash(dec["hash_pre"], dec["hash_post"])
     if not vr.get("match"):
         outp = Path(dec["output_path"])
@@ -174,18 +193,49 @@ def _action_decrypt(payload: dict) -> dict:
             outp.unlink()
         raise SecurityError(vr.get("message", "Integrity verification failed"))
 
-    return {
+    result: dict = {
         "output_path": str(Path(dec["output_path"]).resolve()),
+        "hash_pre": dec["hash_pre"],
         "integrity": "verified",
         "status": "decrypted",
     }
+    ft = dec.get("file_token")
+    if ft:
+        result["file_token_hex"] = ft.hex()
+    return result
+
+
+def _nonce_purge_loop() -> None:
+    """Background thread: purge expired nonces every 10 s.
+
+    WHY a background thread:
+    Nonces are only purged when _verify_envelope() is called. Between calls, the
+    _SEEN_NONCES dict grows unboundedly. An attacker can send a burst of requests
+    (all with unique nonces), wait >30 s for those nonces to expire, then replay
+    any of them — the replay check sees an empty dict and passes. Periodic
+    background purging closes this window.
+    """
+    while True:
+        time.sleep(10)
+        _purge_old_nonces(int(time.time()))
 
 
 def main() -> int:
+    # Start background nonce purge before processing any request.
+    threading.Thread(target=_nonce_purge_loop, daemon=True, name="nonce-purge").start()
+
     ap = argparse.ArgumentParser(description="SFFS isolated worker")
     ap.add_argument("--action", required=True, choices=("decrypt",))
     ap.add_argument("--payload", required=True, help="JSON payload string")
     args = ap.parse_args()
+
+    # SECURITY: master_password is read from stdin, never from CLI args.
+    # This prevents it appearing in process argument lists (tasklist /V,
+    # /proc/<pid>/cmdline, audit logs, etc.).
+    master_password = sys.stdin.readline().rstrip("\n")
+    if not master_password:
+        print(json.dumps({"ok": False, "error": "PermissionError: Missing master password on stdin"}))
+        return 1
 
     try:
         envelope = json.loads(args.payload)
@@ -201,7 +251,7 @@ def main() -> int:
                 policy=policy,
                 is_external_output=_is_external,
             )
-            out = _action_decrypt(payload)
+            out = _action_decrypt(payload, master_password)
         else:
             raise ValueError(f"Unsupported action: {args.action}")
         print(json.dumps({"ok": True, "result": out}))

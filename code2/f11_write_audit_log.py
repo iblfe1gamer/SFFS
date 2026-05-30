@@ -23,8 +23,10 @@ WHY threading lock:
 """
 
 import base64
+import binascii
 import sqlite3
 import threading
+import time
 import json
 import hashlib
 from pathlib import Path
@@ -141,7 +143,10 @@ class AuditLogger:
             iv = base64.b64decode(blob["iv"])
             ct = base64.b64decode(blob["ct"])
             tag = base64.b64decode(blob["tag"])
-        except (json.JSONDecodeError, KeyError, Exception):
+        except (json.JSONDecodeError, KeyError, binascii.Error):
+            # Legacy plaintext field or non-JSON value — return as-is.
+            # Deliberately narrow: GCM auth failures from decrypt_and_verify()
+            # are NOT caught here and will propagate to the caller.
             return stored  # plaintext field (legacy / key not set)
         cipher = AES.new(self.encryption_key, AES.MODE_GCM, nonce=iv)
         return cipher.decrypt_and_verify(ct, tag).decode("utf-8")
@@ -170,7 +175,16 @@ class AuditLogger:
             # BEGIN EXCLUSIVE locks the DB file for the duration of this write.
             conn = sqlite3.connect(str(self.db_path), timeout=30)
             try:
-                conn.execute("BEGIN EXCLUSIVE")
+                # Retry on transient lock contention (e.g. Ctrl+C mid-write from
+                # another process).  Three attempts with linear back-off.
+                for _attempt in range(3):
+                    try:
+                        conn.execute("BEGIN EXCLUSIVE")
+                        break
+                    except sqlite3.OperationalError:
+                        if _attempt == 2:
+                            raise
+                        time.sleep(0.1 * (_attempt + 1))
                 cursor = conn.cursor()
 
                 # Read prev_hash inside the exclusive transaction

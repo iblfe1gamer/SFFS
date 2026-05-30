@@ -32,14 +32,39 @@ import time
 import uuid
 from pathlib import Path
 
-# WHY: pathlib is used for cross-platform path handling — avoids Windows/Linux separator issues
-from pathlib import Path
-# WHY: stat is used to set restrictive file permissions programmatically
-import stat
-# WHY: platform detects Windows vs Linux for different permission models
-import platform
-# WHY: time is needed for lock file timestamp
-import time
+
+
+def _wipe_stale_sandboxes(base_path: Path) -> None:
+    """
+    Wipe all sandbox_<id> directories left over from crashed/unclean sessions.
+
+    Called at the start of createIsolatedSandbox so crash-leftover dirs
+    (which contain decrypted plaintext) are securely erased before any new
+    session begins.  Active sandbox detection: a sandbox is considered stale
+    if its lock file is absent or more than 24 h old.
+    """
+    import datetime
+    cutoff = 24 * 3600  # seconds
+    if not base_path.exists():
+        return
+    for candidate in base_path.iterdir():
+        if not candidate.is_dir() or not candidate.name.startswith("sandbox_"):
+            continue
+        lock = candidate / "sandbox.lock"
+        stale = True
+        if lock.exists():
+            try:
+                age = time.time() - lock.stat().st_mtime
+                if age < cutoff:
+                    stale = False  # likely an active session — leave it
+            except OSError:
+                pass
+        if stale:
+            try:
+                secureWipeDirectory(candidate)
+                shutil.rmtree(candidate, ignore_errors=True)
+            except Exception:
+                pass  # best-effort; log would require core context
 
 
 def createIsolatedSandbox(base_path: Path, session_id: str = None) -> dict:
@@ -61,6 +86,10 @@ def createIsolatedSandbox(base_path: Path, session_id: str = None) -> dict:
     Raises:
         RuntimeError: If sandbox creation fails (permissions denied)
     """
+    # Wipe stale sandboxes from previous crashed/unclean sessions BEFORE creating
+    # the new one — ensures no plaintext lingers on disk across session boundaries.
+    _wipe_stale_sandboxes(base_path)
+
     # Generate session_id if not provided
     if session_id is None:
         session_id = str(uuid.uuid4())
@@ -80,18 +109,28 @@ def createIsolatedSandbox(base_path: Path, session_id: str = None) -> dict:
         # Linux: Use chmod for owner-only access
         os.chmod(sandbox_path, 0o700)
     elif platform.system() == "Windows":
-        # Windows: Remove inherited permissions and grant only current user
+        # Windows: Remove inherited permissions and grant only current user.
+        # WHY: This command removes inherited permissions and grants access only to current user.
+        # SECURITY: Failure is NOT silently swallowed — an unprotected sandbox directory
+        # would retain inherited (potentially world-readable) ACLs, undermining isolation.
         try:
-            # WHY: This command removes inherited permissions and grants access only to current user
             current_user = os.environ.get('USERNAME', 'USER')
             subprocess.run([
                 'icacls', str(sandbox_path),
                 '/inheritance:r',  # Remove inherited permissions
                 '/grant:r', f'{current_user}:(OI)(CI)F'  # Grant full control only to current user
-            ], check=True)
-        except subprocess.CalledProcessError:
-            # Fallback: Just ensure directory exists
-            pass
+            ], check=True, capture_output=True, stdin=subprocess.DEVNULL)
+        except subprocess.CalledProcessError as e:
+            # Clean up the unprotected directory before raising so it doesn't
+            # linger on disk with open permissions.
+            try:
+                shutil.rmtree(str(sandbox_path))
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"Failed to set restrictive ACLs on sandbox {sandbox_path}: {e}. "
+                f"Sandbox isolation cannot be guaranteed — aborting creation."
+            ) from e
 
     # Create subdirectories
     decrypted_dir = sandbox_path / "decrypted"
@@ -100,12 +139,37 @@ def createIsolatedSandbox(base_path: Path, session_id: str = None) -> dict:
     decrypted_dir.mkdir(parents=True, exist_ok=True)
     temp_dir.mkdir(parents=True, exist_ok=True)
     keys_runtime_dir.mkdir(parents=True, exist_ok=True)
+    if platform.system() == "Linux":
+        os.chmod(decrypted_dir, 0o700)
+        os.chmod(temp_dir, 0o700)
+        os.chmod(keys_runtime_dir, 0o700)
 
-    # Write sandbox.lock file containing session_id and timestamp
+    # Write sandbox.lock file containing session_id and timestamp.
+    # SECURITY: On Linux, use os.open with mode 0o600 so the lock file is
+    # owner-readable only, preventing session_id leaking to other local users.
     lock_file = sandbox_path / "sandbox.lock"
     created_time = int(time.time())
     lock_content = f"session_id={session_id}\ncreated={created_time}\n"
-    lock_file.write_text(lock_content)
+    if platform.system() == "Linux":
+        fd = os.open(str(lock_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, lock_content.encode("utf-8"))
+        finally:
+            os.close(fd)
+    else:
+        lock_file.write_text(lock_content)
+
+    # On Windows, verify ACLs were not silently left broad after icacls.
+    # Done AFTER lock file creation so isSandboxIntact() can pass its full check.
+    if platform.system() == "Windows" and not isSandboxIntact(sandbox_path):
+        try:
+            shutil.rmtree(str(sandbox_path))
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"ACL verification failed post-icacls on {sandbox_path} — "
+            f"broad permissions detected. Sandbox isolation cannot be guaranteed."
+        )
 
     # Return dict with sandbox info
     return {
@@ -158,6 +222,24 @@ def destroySandbox(sandbox_path: Path) -> bool:
         return False
 
 
+def _write_and_sync(path: Path, data: bytes) -> None:
+    """
+    Write *data* to *path* and fsync before returning.
+
+    WHY fsync after each overwrite pass:
+    - Without fsync the OS write cache may hold the data in RAM; if the system
+      crashes between overwrite passes, only the older pass reaches disk.
+    - fsync flushes the kernel page cache for the file to the storage device
+      before we proceed to the next pass or deletion.
+    - This is especially important on SSDs with internal write caches and on
+      USB drives where the device may reorder writes arbitrarily.
+    """
+    with open(path, "wb") as fh:
+        fh.write(data)
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
 def secureWipeDirectory(directory: Path) -> None:
     """
     Securely wipe all files in a directory using DOD 5220.22-M 3-pass standard.
@@ -204,18 +286,18 @@ def secureWipeDirectory(directory: Path) -> None:
             # Pass 1: overwrite with zeros
             if file_size > 0:
                 zeros = bytearray(file_size)
-                file_path.write_bytes(zeros)
+                _write_and_sync(file_path, zeros)
 
             # Pass 2: overwrite with ones
             if file_size > 0:
                 ones = bytearray(file_size)
                 ones[:] = b'\xff' * file_size
-                file_path.write_bytes(ones)
+                _write_and_sync(file_path, ones)
 
             # Pass 3: overwrite with random bytes
             if file_size > 0:
                 random_bytes = os.urandom(file_size)
-                file_path.write_bytes(random_bytes)
+                _write_and_sync(file_path, random_bytes)
 
             # Delete the file
             try:
@@ -236,6 +318,29 @@ def secureWipeDirectory(directory: Path) -> None:
             except OSError:
                 # Directory not empty or permission denied
                 pass
+
+
+def secureWipeFile(file_path: Path) -> None:
+    """
+    Securely wipe a single file using DOD 5220.22-M 3-pass standard.
+
+    Same 3-pass overwrite as secureWipeDirectory but for one file.
+    Safe to call if the file does not exist.
+    """
+    if not file_path.exists() or not file_path.is_file():
+        return
+    try:
+        file_size = file_path.stat().st_size
+    except OSError:
+        return
+    if file_size > 0:
+        _write_and_sync(file_path, bytearray(file_size))                  # pass 1: zeros
+        _write_and_sync(file_path, bytearray(b'\xff' * file_size))        # pass 2: ones
+        _write_and_sync(file_path, bytearray(os.urandom(file_size)))      # pass 3: random
+    try:
+        file_path.unlink()
+    except OSError:
+        pass
 
 
 def isSandboxIntact(sandbox_path: Path) -> bool:
@@ -285,8 +390,30 @@ def isSandboxIntact(sandbox_path: Path) -> bool:
         except OSError:
             return False
     elif platform.system() == "Windows":
-        # On Windows, we can't easily check ACLs, so assume intact if it exists
-        pass
+        # Verify ACLs have not been broadened by checking icacls output.
+        # If broad access entries (Everyone, BUILTIN\Users, etc.) appear,
+        # the sandbox has been tampered with or icacls setup failed.
+        try:
+            result = subprocess.run(
+                ["icacls", str(sandbox_path), "/Q"],
+                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                text=True,
+                check=True,
+            )
+            output = result.stdout
+            broad_entries = [
+                "Everyone",
+                "BUILTIN\\Users",
+                "NT AUTHORITY\\Authenticated Users",
+            ]
+            for entry in broad_entries:
+                if entry in output:
+                    print(f"Warning: Sandbox ACL contains broad entry: {entry}")
+                    return False
+        except (subprocess.CalledProcessError, OSError) as e:
+            print(f"Warning: Could not verify sandbox ACL: {e}")
+            return False
 
     return True
 

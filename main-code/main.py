@@ -41,6 +41,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override USB root (advanced)",
     )
+    p.add_argument("--demo-user",     default="demo_user", help="Headless demo username")
+    p.add_argument("--demo-password", default=None,        help="Headless demo password (skips prompt)")
     return p.parse_args()
 
 
@@ -57,28 +59,39 @@ def run_student_demo(n: int) -> int:
     return r.returncode
 
 
-def run_headless_demo() -> None:
+def run_headless_demo(args) -> None:
     from getpass import getpass
 
     from f09_authenticate_user import initAuthDatabase, registerUser
     from sffs_core import SFFSCore
+
+    _DEMO_PASSWORD = "Demo@SFFS2025!"  # meets policy: 12+, upper, lower, digit, special
+
+    interactive = sys.stdin.isatty()
 
     core = SFFSCore()
     core.initialize()
     initAuthDatabase(core.paths["data_dir"] / "auth.db")
 
     print("=== SFFS headless demo ===")
-    user = input("Username [demo_user]: ").strip() or "demo_user"
-    mp = getpass("Account password (12+ chars, upper, lower, digit, special): ")
 
-    db = core.paths["data_dir"] / "auth.db"
+    if interactive and not args.demo_password:
+        user = input("Username [demo_user]: ").strip() or "demo_user"
+        mp   = getpass("Account password (12+ chars, upper, lower, digit, special): ")
+    else:
+        user = args.demo_user
+        mp   = args.demo_password or _DEMO_PASSWORD
+        print(f"Non-interactive — using demo credentials for user '{user}'")
+
+    db  = core.paths["data_dir"] / "auth.db"
     reg = registerUser(user, bytearray(mp.encode()), db)
     if reg.get("status") == "registered":
         print("Registered new user.")
     else:
         print("Register:", reg.get("message", reg))
 
-    pw = bytearray(getpass("Login password (same as account): ").encode())
+    pw = bytearray((args.demo_password or mp).encode()) if (not interactive or args.demo_password) \
+        else bytearray(getpass("Login password (same as account): ").encode())
     auth = core.login(user, pw)
     if not auth.get("authenticated"):
         print("Login failed:", auth)
@@ -97,243 +110,72 @@ def run_headless_demo() -> None:
 
 
 def run_full_app() -> int:
-    from PyQt6.QtCore import QEvent, QObject, Qt, QTimer
-    from PyQt6.QtWidgets import (
-        QApplication,
-        QDialog,
-        QFileDialog,
-        QFormLayout,
-        QHBoxLayout,
-        QLabel,
-        QLineEdit,
-        QMessageBox,
-        QProgressBar,
-        QPushButton,
-        QVBoxLayout,
-    )
-
-    from f09_authenticate_user import registerUser
-    from f14_ui_dashboard import SFSSDashboard, apply_sffs_theme
-    from mouse_entropy import feed_mouse_entropy
+    """Launch SFFS with the modern UI (sffs_ui.py)."""
+    from PyQt6.QtWidgets import QApplication, QDialog
+    from sffs_ui import LoginWindow, SFFSWindow, apply_theme
     from sffs_core import SFFSCore
+    from os_isolation import detect_isolation
 
-    class _EntropyFilter(QObject):
-        def eventFilter(self, obj, event):  # noqa: ANN001
-            if event.type() == QEvent.Type.MouseMove:
-                feed_mouse_entropy(event.pos().x(), event.pos().y())
-            return False
+    # Auto-activate Windows Job Object isolation when not launched via sffs.bat.
+    # On Linux this is a no-op; on Windows it creates the Job Object and sets
+    # the env markers that detect_isolation() checks.
+    if _ROOT not in sys.path:
+        sys.path.insert(0, str(_ROOT / "code2"))
+    try:
+        from windows_job_wrapper import try_activate_job_for_current_process
+        try_activate_job_for_current_process()
+    except Exception:
+        pass  # Non-Windows or ctypes unavailable — isolation badge will show warn
 
     core = SFFSCore()
     core.initialize()
 
     app = QApplication.instance() or QApplication(sys.argv)
-    apply_sffs_theme(app)
-    app.installEventFilter(_EntropyFilter(app))
+    apply_theme(app)
 
-    login = QDialog()
-    login.setWindowTitle("SFFS - Login or Register")
-    root = QVBoxLayout(login)
-    root.addWidget(
-        QLabel(
-            "Password policy: at least 12 characters with uppercase, lowercase, "
-            "a digit, and a special character (!@#$...)."
-        )
-    )
-    form = QFormLayout()
-    u = QLineEdit()
-    u.setText("demo_user")
-    p = QLineEdit()
-    p.setEchoMode(QLineEdit.EchoMode.Password)
-    p.setPlaceholderText("Your password unlocks keys and files for this session")
-    form.addRow("Username", u)
-    form.addRow("Password", p)
-    root.addLayout(form)
-
-    btn_row = QHBoxLayout()
-    btn_reg = QPushButton("Register")
-    btn_log = QPushButton("Log in")
-    btn_quit = QPushButton("Quit")
-    btn_row.addWidget(btn_reg)
-    btn_row.addWidget(btn_log)
-    btn_row.addWidget(btn_quit)
-    root.addLayout(btn_row)
-
-    db_path = core.paths["data_dir"] / "auth.db"
-
-    def do_register() -> None:
-        name = u.text().strip()
-        if not name:
-            QMessageBox.warning(login, "SFFS", "Enter a username.")
-            return
-        try:
-            res = registerUser(name, bytearray(p.text().encode()), db_path)
-        except ValueError as exc:
-            QMessageBox.warning(login, "Register failed", str(exc))
-            return
-        if res.get("status") == "registered":
-            QMessageBox.information(
-                login,
-                "SFFS",
-                "Account created. Click Log in with the same password.",
-            )
-        else:
-            QMessageBox.warning(
-                login,
-                "Register failed",
-                res.get("message", str(res)),
-            )
-
-    def do_login_click() -> None:
-        name = u.text().strip()
-        if not name:
-            QMessageBox.warning(login, "SFFS", "Enter a username.")
-            return
-        r = core.login(name, bytearray(p.text().encode()))
-        if r.get("authenticated"):
-            login.accept()
-        else:
-            QMessageBox.warning(
-                login,
-                "Login failed",
-                r.get("message", "Invalid username or password."),
-            )
-
-    btn_reg.clicked.connect(do_register)
-    btn_log.clicked.connect(do_login_click)
-    btn_quit.clicked.connect(login.reject)
-
-    if login.exec() != int(QDialog.DialogCode.Accepted):
+    # ── Login ──────────────────────────────────────────────────────────────
+    login = LoginWindow(core.paths or {}, core=core)
+    if login.exec() != int(QDialog.DialogCode.Accepted) or not login.session_token:
         return 0
 
+    # ── Main window ────────────────────────────────────────────────────────
     def handle_logout() -> None:
-        core.logout()
+        try:
+            core.logout()
+        except Exception:
+            pass
         app.quit()
 
-    win = SFSSDashboard(
-        core.session_token or "",
-        core.config or {},
-        core.paths or {},
+    win = SFFSWindow(
+        session_token=core.session_token or "",
+        config=core.config or {},
+        paths=core.paths or {},
         core=core,
+        username=login.username,
         on_logout=handle_logout,
     )
-    win.setWindowTitle("SFFS")
 
-    _entropy_state = {"mode": "silent"}
+    # Live security badge
+    iso = detect_isolation()
+    if iso.get("active"):
+        win.set_security_status("● SECURE", "secure")
+    else:
+        win.set_security_status("⚠ NO ISOLATION", "warn")
 
-    def show_entropy_dialog() -> bool:
-        from mouse_entropy import get_entropy_pool_status
-        dlg = QDialog(win)
-        dlg.setWindowTitle("Collecting Entropy")
-        dlg.setModal(True)
-        lay = QVBoxLayout(dlg)
-        lay.addWidget(QLabel(
-            "Move your mouse randomly over this window\n"
-            "to generate encryption entropy."
-        ))
-        bar = QProgressBar()
-        bar.setRange(0, 100)
-        lay.addWidget(bar)
-        status_label = QLabel("0%")
-        status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(status_label)
-        timer = QTimer()
+    # Wire core threat/USB callbacks → UI alerts
+    core.process_monitor and setattr(
+        core,
+        "_on_threat_detected",
+        lambda t, d: win.showSecurityAlert(f"{t}: {d}", "CRITICAL"),
+    )
 
-        def _update() -> None:
-            s = get_entropy_pool_status()
-            bar.setValue(s["percentage"])
-            status_label.setText(f"{s['percentage']}%")
-            if s["is_ready"]:
-                timer.stop()
-                dlg.accept()
-
-        timer.timeout.connect(_update)
-        timer.start(100)
-        result = dlg.exec()
-        timer.stop()
-        return result == int(QDialog.DialogCode.Accepted)
-
-    def do_encrypt() -> None:
-        fp = win._selected_file
-        if not fp:
-            QMessageBox.information(win, "SFFS", "Select a file via drag-and-drop first.")
-            return
-        if _entropy_state["mode"] == "interactive":
-            if not show_entropy_dialog():
-                return
-        try:
-            out = core.encryptFileOperation(Path(fp))
-            win._status.setText(f"Encrypted: {out['sffs_path'].name}")
-            win.refresh_sandbox_list()
-        except RuntimeError as e:
-            if "INSUFFICIENT_ENTROPY" in str(e):
-                QMessageBox.warning(
-                    win,
-                    "Entropy Required",
-                    "Please move your mouse randomly over the window before encrypting.",
-                )
-            else:
-                QMessageBox.warning(win, "Encrypt failed", str(e))
-        except Exception as e:
-            QMessageBox.warning(win, "Encrypt failed", str(e))
-
-    def do_decrypt() -> None:
-        path, _ = QFileDialog.getOpenFileName(win, "Open .sffs", "", "SFFS (*.sffs)")
-        if not path:
-            return
-
-        msg = QMessageBox(win)
-        msg.setWindowTitle("Decrypt Location")
-        msg.setText(
-            "Where should the decrypted file be saved?\n\n"
-            "  Sandbox — Temporary, auto-wiped on logout\n"
-            "  Disk — Permanent, stays until you delete it"
-        )
-        sandbox_btn = msg.addButton("Sandbox", QMessageBox.ButtonRole.AcceptRole)
-        disk_btn = msg.addButton("Disk…", QMessageBox.ButtonRole.ActionRole)
-        msg.addButton(QMessageBox.StandardButton.Cancel)
-        msg.setDefaultButton(sandbox_btn)
-        msg.exec()
-        clicked = msg.clickedButton()
-
-        if clicked == disk_btn:
-            warn = QMessageBox.warning(
-                win,
-                "Security Warning",
-                "This file will be decrypted to your chosen location on disk.\n"
-                "It will NOT be placed in the sandbox and will NOT be\n"
-                "automatically wiped when you end your session.\n\n"
-                "The decrypted file will remain on disk until you delete it.",
-                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-            )
-            if warn == QMessageBox.StandardButton.Cancel:
-                return
-            save_path, _ = QFileDialog.getSaveFileName(
-                win,
-                "Save Decrypted File",
-                Path(path).stem,
-            )
-            if not save_path:
-                return
-            try:
-                out = core.decryptFileOperation(Path(path), output_path=Path(save_path))
-                win._status.setText(f"Decrypted to: {out['output_path']}")
-            except Exception as e:
-                QMessageBox.warning(win, "Decrypt failed", str(e))
-        elif clicked == sandbox_btn:
-            try:
-                out = core.decryptFileOperation(Path(path))
-                win._status.setText(f"Decrypted to sandbox: {out['output_path'].name}")
-                win.refresh_sandbox_list()
-            except Exception as e:
-                QMessageBox.warning(win, "Decrypt failed", str(e))
-
-    win._enc.clicked.connect(do_encrypt)
-    win._dec.clicked.connect(do_decrypt)
-    win.refresh_sandbox_list()
     win.show()
     rc = app.exec()
-    if core.session_token:
-        core.logout()
+    try:
+        if core.session_token:
+            core.logout()
+    except Exception:
+        pass
     return rc
 
 
@@ -352,7 +194,7 @@ def main() -> int:
     if args.student:
         return run_student_demo(args.student)
     if args.headless:
-        run_headless_demo()
+        run_headless_demo(args)
         return 0
     return run_full_app()
 

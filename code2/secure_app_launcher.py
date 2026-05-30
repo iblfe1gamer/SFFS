@@ -106,9 +106,18 @@ def _secure_mode_enforced(policy: dict[str, Any]) -> None:
 def resolve_launch(
     target_file: Path,
     manifest_path: Path | None = None,
+    allowed_root: Path | None = None,
 ) -> dict[str, Any]:
     """
     Resolve and validate launch policy without starting a process.
+
+    Args:
+        target_file: File to open.
+        manifest_path: Override manifest location (tests / custom deployments).
+        allowed_root: Override the manifest's allowed_open_root with an absolute
+            path.  Pass ``core.sandbox["decrypted_dir"]`` so per-session sandbox
+            directories (e.g. ``sandbox/sandbox_<id>/decrypted/``) are accepted
+            without weakening the static manifest policy used by CLI callers.
 
     Returns:
         Dict with exe_path, args, working_dir, target_file, app_id.
@@ -122,7 +131,10 @@ def resolve_launch(
     _secure_mode_enforced(policy)
 
     target_file = Path(target_file).resolve()
-    allowed_open_root = (root / policy["allowed_open_root"]).resolve()
+    if allowed_root is not None:
+        allowed_open_root = Path(allowed_root).resolve()
+    else:
+        allowed_open_root = (root / policy["allowed_open_root"]).resolve()
     if not _is_within(target_file, allowed_open_root):
         raise LauncherPolicyError(
             f"Target file must be inside sandbox open root: {allowed_open_root}"
@@ -168,11 +180,15 @@ def launch_sandbox_file(
     *,
     wait: bool = False,
     manifest_path: Path | None = None,
+    allowed_root: Path | None = None,
 ) -> dict[str, Any]:
     """
     Launch a sandbox file with the mapped portable app under strict policy.
+
+    Pass ``allowed_root`` to accept per-session decrypted dirs that differ from
+    the static manifest path (e.g. ``sandbox/sandbox_<id>/decrypted/``).
     """
-    launch = resolve_launch(target_file, manifest_path=manifest_path)
+    launch = resolve_launch(target_file, manifest_path=manifest_path, allowed_root=allowed_root)
     cmd = [str(launch["exe_path"]), *launch["args"]]
     working_dir = launch["working_dir"]
     # Proactively clear stale temporary artifacts before starting a viewer.
@@ -195,6 +211,7 @@ def launch_sandbox_file(
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NO_WINDOW if platform.system().lower() == "windows" else 0,
     )
     result = {
         "status": "launched",

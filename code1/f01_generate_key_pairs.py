@@ -39,9 +39,7 @@ from cryptography.hazmat.primitives.serialization import (
 )
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.backends import default_backend
 from pathlib import Path
-import secrets
 import hashlib
 import datetime
 
@@ -84,7 +82,6 @@ def generateKeyPairs(output_dir: Path, key_size: int = 2048) -> dict:
     key = rsa.generate_private_key(
         public_exponent=65537,
         key_size=key_size,
-        backend=default_backend(),
     )
 
     # Export public key to PEM format (safe to share, human-readable)
@@ -98,7 +95,10 @@ def generateKeyPairs(output_dir: Path, key_size: int = 2048) -> dict:
     # Generate key_id from public key hash BEFORE saving
     # Why: key_id is used in the filename to prevent silent overwrites
     # Each key pair gets a unique filename — no collision, no data loss
-    key_id = hashlib.sha256(public_pem).hexdigest()[:8]
+    # WHY 16 hex chars (64 bits) instead of 8 (32 bits):
+    # At 8 chars the birthday collision probability is ~1/2^32 — borderline for
+    # large key deployments.  16 chars gives ~1/2^64, effectively negligible.
+    key_id = hashlib.sha256(public_pem).hexdigest()[:16]
 
     # Write public key to file — this is safe because it cannot decrypt data
     # Only the private key can decrypt, and we never write that to disk here

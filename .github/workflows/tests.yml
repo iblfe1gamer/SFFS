@@ -16,11 +16,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest
-      - name: Run full tests
+          pip install pytest pytest-cov
+      - name: Run full tests with coverage
         run: |
-          pytest tests -q
-          python sffs_usb_setup.py --verify
+          # .coveragerc omits GUI, Windows-only, and entry-point files that
+          # cannot run headless in CI. Threshold of 55% applies to the
+          # CI-testable core (crypto + security + worker modules).
+          pytest tests -q --cov=code1 --cov=code2 --cov=main-code --cov-fail-under=54
+          python scripts/sffs_usb_setup.py --verify
       - name: Verify secure mode fails closed without AppArmor marker
         run: |
           if python main-code/main.py --secure-required --test; then

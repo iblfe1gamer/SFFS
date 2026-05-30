@@ -143,7 +143,9 @@ def emergencyLock(trigger: str, sandbox_path: Path = None, session_token: str = 
 
     # Step 7: terminate process unconditionally — all triggers require hard exit.
     # Use sys.exit() not raise SystemExit() so tests can monkey-patch sys.exit.
-    sys.exit(0)
+    # WHY exit(1) not exit(0): a non-zero code lets callers and monitoring tools
+    # distinguish a successful clean exit from an emergency lock trigger.
+    sys.exit(1)
 
 
 def setupUSBRemovalDetection(usb_root: Path, lock_callback) -> threading.Thread:

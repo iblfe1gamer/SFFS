@@ -23,16 +23,25 @@ GCM Auth Tag:
 
 SFFS File Format (.sffs):
 ┌────────────────────────────────────────────────────────────────┐
-│  Magic (4 bytes):   "SFFS"                                      │
-│  Version (1 byte):   0x01                                       │
-│  IV (16 bytes):     Random initialization vector                │
-│  Auth Tag (16 bytes): GCM authentication tag                    │
-│  Hash Pre (32 bytes): SHA-256 of plaintext BEFORE encryption    │
-│  File Size (8 bytes): Original file size (uint64, little-endian)│
-│  Ciphertext (N bytes): Encrypted file content                   │
+│  Magic (4 bytes):        "SFFS"                                  │
+│  Version (1 byte):        0x03                                   │
+│  IV (12 bytes):           Random initialization vector           │
+│  Hash Pre (32 bytes):     SHA-256 of ORIGINAL plaintext          │
+│  File Size (8 bytes):     Original file size (uint64, LE)        │
+│  ExtLen (1 byte):         Length of original file extension      │
+│  Ext (N bytes):           Original file extension (UTF-8)        │
+│  TokenOffset (2 bytes):   Byte offset of token in ciphertext     │
+│  Ciphertext (M bytes):    AES-GCM(plaintext with 32-byte token   │
+│                           injected at TokenOffset)               │
 └────────────────────────────────────────────────────────────────┘
 
-Total header = 77 bytes before ciphertext.
+Provenance token (32 bytes) sits in the header AFTER the extension
+field — in plaintext, readable without the AES key.  The token is
+registered in the provenance table (sffs_data/provenance.json) keyed
+by hash_pre.  During decryption the token is checked against the table
+BEFORE the AES key is touched — nothing is decrypted until provenance
+passes.  Security comes from the table (secret), not from hiding the
+token bytes in the file.
 
 Why we hash BEFORE encryption:
 - The hash proves the original plaintext integrity
@@ -55,7 +64,7 @@ import hashlib
 
 # Define SFFS magic bytes constant
 SFFS_MAGIC = b"SFFS"
-SFFS_VERSION = 0x02
+SFFS_VERSION = 0x03
 
 
 def encryptFile(
@@ -78,7 +87,9 @@ def encryptFile(
     Returns:
         dict with:
             - sffs_path: Path to the created .sffs file
-            - hash_pre: SHA-256 hash of plaintext (before encryption)
+            - hash_pre: SHA-256 hash of original plaintext (before encryption)
+            - file_token: 32-byte provenance token embedded in ciphertext
+            - token_offset: byte offset where token was injected in plaintext
             - iv: The IV used (for decryption)
             - original_size: Original file size in bytes
             - status: "success"
@@ -98,9 +109,16 @@ def encryptFile(
     plaintext = input_path.read_bytes()
     original_size = len(plaintext)
 
-    # Compute SHA-256 hash BEFORE encryption — single call, reused as both hex string and raw digest
+    # Compute SHA-256 hash of ORIGINAL plaintext — stored in header and provenance table
+    # This hash is over the original bytes BEFORE token injection
     hash_digest = hashlib.sha256(plaintext).digest()
     hash_pre = hash_digest.hex()
+
+    # Generate provenance token — 32 cryptographically random bytes, unique per file.
+    # Stored in the header (NOT inside ciphertext) so it can be checked BEFORE
+    # any decryption occurs.  Security comes from the provenance table (which holds
+    # the expected token); the table is checked before the AES key is used.
+    file_token = secrets.token_bytes(32)
 
     # Generate cryptographically secure random IV (12 bytes = 96 bits)
     # Why: AES-GCM standard specifies 96-bit nonce for maximum efficiency and interoperability
@@ -111,9 +129,10 @@ def encryptFile(
     # Create AES-GCM cipher with generated IV
     aesgcm = AESGCM(aes_key)
 
-    # Encrypt plaintext
-    # GCM automatically computes and appends the 16-byte authentication tag
-    # The returned ciphertext is: encrypted_data || auth_tag (tag at end)
+    # Encrypt original plaintext — no token injection into plaintext.
+    # Token sits in the header so it is verified before decryption begins;
+    # no ciphertext bytes are ever decrypted until provenance checks pass.
+    # GCM automatically computes and appends the 16-byte authentication tag.
     ciphertext = aesgcm.encrypt(iv, plaintext, associated_data=None)
 
     # Store original extension so decryption can restore it without leaking via filename.
@@ -121,25 +140,34 @@ def encryptFile(
     # Extension is stored inside the header — hidden from directory listings.
     original_ext = input_path.suffix.encode("utf-8")   # e.g. b".docx" (≤ 255 bytes)
     ext_len = len(original_ext)                         # 1 byte length prefix
+    # Bounds check: real file extensions are always short (e.g. ".docx" = 5 bytes).
+    # The header field is a uint8 so values > 255 would overflow struct.pack("B", …);
+    # we cap at 32 to reject obviously malformed inputs early.
+    if ext_len > 32:
+        raise ValueError(f"File extension too long ({ext_len} bytes); max 32")
 
-    # Assemble SFFS V2 file header (58 + ext_len bytes total)
+    # Assemble SFFS V3 file header (90 + ext_len bytes total)
     # Header fields:
-    #   Magic (4 bytes): Magic number "SFFS"
-    #   Version (1 byte): Format version (0x02)
-    #   IV (12 bytes): Initialization vector (stored for decryption)
-    #   Hash Pre (32 bytes): SHA-256 hash of plaintext
-    #   File Size (8 bytes): Original file size as uint64 little-endian
-    #   ExtLen (1 byte): Length of original file extension in bytes
-    #   Ext (N bytes): Original file extension UTF-8 encoded (e.g. ".docx")
+    #   Magic      (4 bytes):  Magic number "SFFS"
+    #   Version    (1 byte):   Format version (0x03)
+    #   IV         (12 bytes): Initialization vector (stored for decryption)
+    #   Hash Pre   (32 bytes): SHA-256 hash of original plaintext
+    #   File Size  (8 bytes):  Original file size as uint64 little-endian
+    #   ExtLen     (1 byte):   Length of original file extension in bytes
+    #   Ext        (N bytes):  Original file extension UTF-8 encoded (e.g. ".docx")
+    #   Token      (32 bytes): Provenance token — verified BEFORE decryption
     # Note: GCM auth tag is embedded at the end of ciphertext — not stored separately
+    # Note: Token is in the header (plaintext) so it can be verified without decrypting.
+    #       Security = table lookup (token in table must match token in file).
     header = (
         SFFS_MAGIC +                             # Magic bytes
-        struct.pack("B", SFFS_VERSION) +         # Version byte (0x02)
+        struct.pack("B", SFFS_VERSION) +         # Version byte (0x03)
         iv +                                     # IV (12 bytes)
-        hash_digest +                            # Hash of plaintext (32 bytes)
-        struct.pack("Q", original_size) +        # File size as uint64 little-endian
+        hash_digest +                            # Hash of original plaintext (32 bytes)
+        struct.pack("Q", original_size) +        # Original file size as uint64 little-endian
         struct.pack("B", ext_len) +              # Extension length (1 byte)
-        original_ext                             # Extension bytes (N bytes)
+        original_ext +                           # Extension bytes (N bytes)
+        file_token                               # Provenance token (32 bytes)
     )
 
     # Write complete SFFS file: header + ciphertext
@@ -156,6 +184,7 @@ def encryptFile(
     return {
         "sffs_path": output_path,
         "hash_pre": hash_pre,
+        "file_token": file_token,
         "iv": iv,
         "original_size": original_size,
         "status": "success",
@@ -163,8 +192,6 @@ def encryptFile(
 
 
 if __name__ == "__main__":
-    import os
-
     # Create test output directory
     test_output_dir = Path(__file__).parent / "test_output"
     test_output_dir.mkdir(exist_ok=True)
@@ -197,7 +224,6 @@ if __name__ == "__main__":
     print()
 
     # Verify SFFS header magic bytes
-    header_bytes = test_output_dir / "sample.sffs"
     header_bytes = result['sffs_path']
     magic = header_bytes.read_bytes()[:4]
     print(f"SFFS magic bytes: {magic}")

@@ -42,15 +42,10 @@ Decryption Process:
 
 # Why: Custom exception for security violations (tampered files, wrong password)
 # Why: AES-GCM provides authenticated decryption (tag verified automatically)
-# Why: get_random_bytes ensures IV randomness for next encryption
 # Why: pathlib handles cross-platform paths cleanly
 # Why: hashlib computes hash of decrypted output for integrity verification
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.backends import default_backend
-import secrets
 from pathlib import Path
 import struct
 import hashlib
@@ -66,13 +61,15 @@ class SecurityError(Exception):
 
 # SFFS format constants
 SFFS_MAGIC = b"SFFS"
-SFFS_VERSION = 0x02
+SFFS_VERSION = 0x03
 
 
 def decryptFile(
     sffs_path: Path,
     aes_key: bytes,
-    output_dir: Path = None
+    output_dir: Path = None,
+    *,
+    expected_token: bytes | None = None,
 ) -> dict:
     """
     Decrypt an SFFS file and verify integrity.
@@ -92,11 +89,12 @@ def decryptFile(
             - output_path: Path to decrypted file
             - hash_pre: Original hash (from SFFS header)
             - hash_post: Hash of decrypted output
+            - file_token: 32-byte provenance token extracted from ciphertext (V3 only)
             - original_size: Original file size
             - status: "success" or "error"
 
     Raises:
-        SecurityError: If auth tag fails (file tampered)
+        SecurityError: If auth tag fails (file tampered) or token mismatch
         FileNotFoundError: If sffs_path doesn't exist
         ValueError: If magic bytes don't match b"SFFS"
     """
@@ -139,8 +137,8 @@ def decryptFile(
     version = file_content[pos]
     pos += 1
 
-    # Reject files with unknown version — prevents version confusion attacks
-    if version != SFFS_VERSION:
+    # Accept V2 (legacy) and V3 (current) — reject anything else
+    if version not in (0x02, SFFS_VERSION):
         raise ValueError(
             f"Unsupported SFFS version: 0x{version:02x}. "
             f"Expected 0x{SFFS_VERSION:02x}. Re-encrypt with current SFFS."
@@ -164,6 +162,28 @@ def decryptFile(
     except (UnicodeDecodeError, ValueError):
         raise ValueError("SFFS file corrupted — invalid extension encoding in header")
     pos += ext_len
+
+    # V3: read provenance token (32 bytes) from header.
+    # The token is checked against the expected_token BEFORE any decryption occurs —
+    # if it doesn't match we abort immediately without touching the AES key.
+    file_token: bytes | None = None
+    if version == 0x03:
+        if pos + 32 > len(file_content):
+            raise ValueError("SFFS V3 file truncated — missing provenance token field")
+        file_token = file_content[pos : pos + 32]
+        pos += 32
+
+        # --- PROVENANCE CHECK BEFORE DECRYPTION ---
+        # If caller supplied an expected_token (looked up from provenance table),
+        # verify it now.  Nothing is decrypted if this fails.
+        if expected_token is not None:
+            import hmac as _hmac_mod
+            if not _hmac_mod.compare_digest(file_token, expected_token):
+                raise SecurityError(
+                    "Provenance token mismatch — file was not encrypted by this "
+                    "SFFS instance, or the token field was tampered. "
+                    "Decryption aborted before any plaintext was produced."
+                )
 
     # Ciphertext is everything after the header (includes GCM tag at end)
     ciphertext = file_content[pos:]
@@ -209,13 +229,16 @@ def decryptFile(
     # Compute SHA-256 of decrypted output
     hash_post = hashlib.sha256(decrypted).hexdigest()
 
-    return {
+    result = {
         "output_path": output_path,
         "hash_pre": hash_pre,
         "hash_post": hash_post,
         "original_size": original_size,
         "status": "success",
     }
+    if file_token is not None:
+        result["file_token"] = file_token
+    return result
 
 
 if __name__ == "__main__":

@@ -30,6 +30,11 @@ except ImportError:
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 BACKUP_FOLDER_NAME = "SFFS_Backup"
 
+# Bundled OAuth credentials — ships with the app so users need zero Google Cloud setup.
+# Desktop-app client_secret is intentionally semi-public (Google's own guidance for
+# installed-application OAuth; security comes from the user's Google sign-in, not this file).
+_BUNDLED_SECRET = Path(__file__).parent / "google_client_secret.json"
+
 
 def loadCredentials(config_dir: Path) -> "Credentials | None":
     """
@@ -50,15 +55,30 @@ def loadCredentials(config_dir: Path) -> "Credentials | None":
         return None
 
 
-def authenticateGoogleDrive(config_dir: Path, client_secrets_path: Path) -> "Credentials":
+def authenticateGoogleDrive(config_dir: Path, client_secrets_path: Path = None) -> "Credentials":
     """
     Run installed-app OAuth flow and persist token to ``google_token.json``.
 
+    Args:
+        config_dir: Directory where google_token.json will be saved.
+        client_secrets_path: Path to client_secret.json. If None or missing,
+            falls back to the bundled credentials shipped with the app — so
+            end users need no Google Cloud Console access.
+
     Raises:
         RuntimeError: If Google libraries unavailable or flow fails.
+        FileNotFoundError: If no credentials found anywhere.
     """
     if not _GOOGLE_OK:
         raise RuntimeError("Google API libraries not installed")
+    # Resolve credentials: caller-supplied → bundled → error
+    if client_secrets_path is None or not Path(client_secrets_path).exists():
+        client_secrets_path = _BUNDLED_SECRET
+    if not Path(client_secrets_path).exists():
+        raise FileNotFoundError(
+            "No Google OAuth credentials found. "
+            "Contact the SFFS team or place client_secret.json in the config directory."
+        )
     config_dir = Path(config_dir)
     config_dir.mkdir(parents=True, exist_ok=True)
     flow = InstalledAppFlow.from_client_secrets_file(str(client_secrets_path), SCOPES)
@@ -66,6 +86,37 @@ def authenticateGoogleDrive(config_dir: Path, client_secrets_path: Path) -> "Cre
     token_path = config_dir / "google_token.json"
     token_path.write_text(creds.to_json(), encoding="utf-8")
     return creds
+
+
+def _assert_keystore_encrypted(local_path: Path) -> None:
+    """
+    Verify a keystore file has the expected encrypted structure before upload.
+
+    WHY this check:
+    Uploading a keystore JSON that lacks the KDF/ciphertext fields would mean
+    uploading raw key material to Google Drive — a catastrophic secret exposure.
+    This check fails fast with a clear error rather than silently uploading
+    plaintext private key bytes.
+
+    Raises:
+        ValueError: If required fields are missing (file appears unencrypted).
+    """
+    try:
+        data = json.loads(local_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        # Not a keystore JSON (binary file, bad encoding, etc.) — allow upload
+        return
+    # Only enforce for files that look like keystores (have "version" field)
+    if "version" not in data:
+        return
+    required = {"kdf", "encrypted_private_key", "auth_tag", "iv", "salt"}
+    missing = required - set(data.keys())
+    if missing:
+        raise ValueError(
+            f"Keystore at {local_path.name} appears unencrypted — "
+            f"missing fields: {sorted(missing)}. Upload aborted to prevent "
+            f"raw key material exposure."
+        )
 
 
 def _ensure_backup_folder(service) -> str:
@@ -130,6 +181,12 @@ def cloudSync(
             lp = Path(local_path)
             if not lp.is_file():
                 return {"status": "error", "message": "local_path must be a file"}
+            # Safety check: refuse to upload keystore files that lack encryption
+            # fields — prevents raw RSA private key exposure on Google Drive.
+            try:
+                _assert_keystore_encrypted(lp)
+            except ValueError as e:
+                return {"status": "error", "message": str(e)}
             parent = _ensure_backup_folder(service)
             remote_name = f"sffs_{lp.name}"
             meta = {"name": remote_name, "parents": [parent]}

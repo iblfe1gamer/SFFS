@@ -61,8 +61,10 @@ from Crypto.Hash import SHA256, HMAC
 from Crypto.Random import get_random_bytes
 from Crypto.PublicKey import RSA
 import datetime
+import hmac as _hmac
 import json
 import base64
+import hashlib
 import struct
 from pathlib import Path
 from typing import Optional
@@ -82,6 +84,7 @@ def secureKeyStorage(
     output_dir: Path,
     key_id: str = None,
     kdf: str = "ARGON2ID",
+    rng_func=None,
 ) -> dict:
     """
     Securely store an RSA private key using PBKDF2 + AES-256-GCM.
@@ -91,6 +94,9 @@ def secureKeyStorage(
         master_password: User's master password (will be derived to key)
         output_dir: Directory to store keystore JSON file
         key_id: Optional key identifier. If None, generates from private key bytes
+        rng_func: Optional callable(n) -> bytes for salt/IV generation.
+                  Defaults to get_random_bytes. Pass session_random_bytes
+                  to mix in mouse-movement entropy collected before key gen.
 
     Returns:
         dict with:
@@ -101,10 +107,12 @@ def secureKeyStorage(
     Raises:
         ValueError: If key_id is provided but too long
     """
+    _rng = rng_func if rng_func is not None else get_random_bytes
+
     # Generate random salt (16 bytes)
     # Why: Salt prevents rainbow table attacks
     # Each key store must have a unique salt
-    salt = get_random_bytes(16)
+    salt = _rng(16)
 
     # Derive AES key from password (Argon2id default, PBKDF2 compatibility mode).
     if kdf.upper() == "ARGON2ID":
@@ -131,17 +139,26 @@ def secureKeyStorage(
         raise ValueError(f"Unsupported KDF: {kdf}")
 
     # Generate random IV for GCM mode
-    iv = get_random_bytes(12)  # GCM nonce is 12 bytes minimum
+    iv = _rng(12)  # GCM nonce is 12 bytes minimum
+
+    # Copy the private key into a mutable bytearray so we can zero it explicitly
+    # after encryption.  The original `private_key_bytes` argument is `bytes`
+    # (immutable), so setting it to None only removes the local reference; the
+    # actual bytes object may linger in memory until CPython's GC reclaims it.
+    # A bytearray lets us overwrite every byte with 0 deterministically.
+    private_key_mutable = bytearray(private_key_bytes)
 
     # Encrypt private key with AES-256-GCM
     cipher = AES.new(derived_key, AES.MODE_GCM, nonce=iv)
-    encrypted_key, auth_tag = cipher.encrypt_and_digest(private_key_bytes)
+    encrypted_key, auth_tag = cipher.encrypt_and_digest(bytes(private_key_mutable))
 
-    # Write to memory buffer for JSON serialization
-    # Immediately overwrite private_key_bytes in memory after use
-    # In C: memset(private_key_bytes, 0, sizeof(private_key_bytes))
-    # In Python, we rely on GC, but we can help by reassigning
-    private_key_bytes = None  # Wipe from memory
+    # Zero the mutable copy explicitly — guaranteed regardless of GC timing.
+    for _i in range(len(private_key_mutable)):
+        private_key_mutable[_i] = 0
+    private_key_mutable = None
+    # Drop the original immutable reference too (best-effort — CPython may still
+    # have the object in other references the caller holds).
+    private_key_bytes = None
 
     # Encode everything to base64 for JSON storage
     salt_b64 = base64.b64encode(salt).decode("ascii")
@@ -188,7 +205,7 @@ def hashlib_sha256_sandwich(salt: bytes, iv: bytes) -> str:
     # Sandwich: hash(salt || hash(iv))
     inner_hash = hashlib.sha256(iv).digest()
     outer_hash = hashlib.sha256(salt + inner_hash).hexdigest()
-    return outer_hash[:8]
+    return outer_hash[:16]
 
 
 def retrieveKey(keystore_path: Path, master_password: str) -> bytes:
@@ -321,7 +338,13 @@ def wrapAESKey(aes_key: bytes, public_key_path: Path, bound_file_path: Optional[
             with bound.open("rb") as _fh:
                 for _chunk in iter(lambda: _fh.read(8 * 1024 * 1024), b""):
                     _h.update(_chunk)
-            envelope["bound_file_sha256"] = _h.hexdigest()
+            # WHY HMAC instead of raw SHA-256:
+            # Storing the raw SHA-256 of the ciphertext lets an attacker with
+            # read access to the wrap envelope fingerprint which encrypted files
+            # share content (correlation attack).  Keying the digest with the
+            # AES session key makes it unguessable without the key.
+            binding_mac = _hmac.new(aes_key, _h.digest(), hashlib.sha256).hexdigest()
+            envelope["bound_file_mac"] = binding_mac  # replaces bound_file_sha256
     return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
 
 
@@ -348,7 +371,8 @@ def unwrapAESKey(
     wrapped_key = encrypted_aes_key
     commitment = None
     bound_file_name = None
-    bound_file_sha256 = None
+    bound_file_sha256 = None   # legacy field name
+    bound_file_mac = None      # v2.1+ HMAC-keyed binding
     blob = encrypted_aes_key.lstrip()
     if blob.startswith(b"{"):
         env = json.loads(encrypted_aes_key.decode("utf-8"))
@@ -356,7 +380,10 @@ def unwrapAESKey(
             wrapped_key = base64.b64decode(env["wrapped_key_b64"])
             commitment = env.get("key_commitment")
             bound_file_name = env.get("bound_file_name")
+            # Support both old (sha256) and new (mac) binding fields for
+            # backwards compatibility with wrap envelopes created before this fix.
             bound_file_sha256 = env.get("bound_file_sha256")
+            bound_file_mac = env.get("bound_file_mac")
 
     # Retrieve RSA private key
     private_key_bytes = retrieveKey(keystore_path, master_password)
@@ -367,11 +394,11 @@ def unwrapAESKey(
     if commitment and hashlib.sha256(aes_key).hexdigest() != commitment:
         raise ValueError("Wrapped key commitment mismatch")
 
-    if expected_sffs_path is not None and (bound_file_name or bound_file_sha256):
+    if expected_sffs_path is not None and (bound_file_name or bound_file_sha256 or bound_file_mac):
         exp = Path(expected_sffs_path)
         if bound_file_name and exp.name != bound_file_name:
             raise ValueError("Wrap metadata file-name mismatch")
-        if bound_file_sha256:
+        if bound_file_mac or bound_file_sha256:
             if not exp.exists():
                 raise FileNotFoundError(f"Expected .sffs file not found: {exp}")
             # Stream hash to avoid OOM on large .sffs files
@@ -379,9 +406,16 @@ def unwrapAESKey(
             with exp.open("rb") as _f3:
                 for _c3 in iter(lambda: _f3.read(8 * 1024 * 1024), b""):
                     _h3.update(_c3)
-            actual_sha = _h3.hexdigest()
-            if actual_sha != bound_file_sha256:
-                raise ValueError("Wrap metadata file-hash mismatch")
+            if bound_file_mac:
+                # New HMAC binding: re-derive with the unwrapped AES key.
+                expected_mac = _hmac.new(aes_key, _h3.digest(), hashlib.sha256).hexdigest()
+                if not _hmac.compare_digest(expected_mac, bound_file_mac):
+                    raise ValueError("Wrap metadata file-MAC mismatch")
+            else:
+                # Legacy plaintext-sha256 binding (backwards compatibility).
+                actual_sha = _h3.hexdigest()
+                if actual_sha != bound_file_sha256:
+                    raise ValueError("Wrap metadata file-hash mismatch")
 
     return aes_key
 

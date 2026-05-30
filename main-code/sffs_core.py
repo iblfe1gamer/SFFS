@@ -109,6 +109,7 @@ class SFFSCore:
         self._decrypted_registry: dict[str, dict] = {}
         self._watcher_thread: Optional[threading.Thread] = None
         self._watcher_stop = threading.Event()
+        self._gui_alert_callback = None
 
     def _derive_wrap_key(self, password: str) -> bytes:
         """Derive 32-byte AES key for WrapStore from session password + stored salt."""
@@ -128,6 +129,9 @@ class SFFSCore:
             hash_len=32,
             type=Type.ID,
         )
+
+    def set_gui_alert_callback(self, fn) -> None:
+        self._gui_alert_callback = fn
 
     def set_entropy_mode(self, mode: str) -> None:
         if mode not in ("silent", "interactive"):
@@ -167,6 +171,11 @@ class SFFSCore:
         }
 
     def _on_threat_detected(self, threat_type: str, details: str) -> None:
+        if self._gui_alert_callback is not None:
+            try:
+                self._gui_alert_callback(f"THREAT: {threat_type}", "CRITICAL")
+            except Exception:
+                pass
         self._terminate_active_workers()
         self._terminate_active_viewers()
         try:
@@ -182,6 +191,11 @@ class SFFSCore:
             pass
 
     def _on_usb_removed(self, _reason: str = "USB_REMOVED") -> None:
+        if self._gui_alert_callback is not None:
+            try:
+                self._gui_alert_callback("USB REMOVED — locking", "CRITICAL")
+            except Exception:
+                pass
         self._terminate_active_workers()
         self._terminate_active_viewers()
         try:

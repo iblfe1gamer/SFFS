@@ -163,11 +163,7 @@ def run_full_app() -> int:
         win.set_security_status("⚠ NO ISOLATION", "warn")
 
     # Wire core threat/USB callbacks → UI alerts
-    core.process_monitor and setattr(
-        core,
-        "_on_threat_detected",
-        lambda t, d: win.showSecurityAlert(f"{t}: {d}", "CRITICAL"),
-    )
+    core.set_gui_alert_callback(win.showSecurityAlert)
 
     win.show()
     rc = app.exec()

@@ -1,0 +1,78 @@
+{
+  "$schema": "https://aka.ms/codetour-schema",
+  "title": "SFFS Security Review — Trust Boundaries & Attack Surface",
+  "description": "For security assessors and reviewers: follow the trust boundary from login through decrypt, hitting every security control along the way. After this tour you can articulate the threat model, identify each mitigated attack class, and point to the exact code that closes each gap.",
+  "ref": "c466d68",
+  "steps": [
+    {
+      "directory": "main-code",
+      "title": "Orchestration layer — where trust decisions are made",
+      "description": "**Situation:** `main-code/` is the only directory that imports from all three student modules (code1, code2, code3). It owns the session lifecycle and is where every cross-module trust decision happens.\n\n**Mechanism:** `sffs_core.py` is the state machine; `isolated_worker.py` is a privilege-separated subprocess; `wrap_store.py` is the encrypted key store.\n\n**Implication:** If you're auditing a data flow, start here — every sensitive operation passes through `SFFSCore`.\n\n**Gotcha:** `main.py` is just the CLI dispatcher. The real orchestration is in `sffs_core.py`."
+    },
+    {
+      "file": "main-code/main.py",
+      "line": 112,
+      "title": "Entry point: run_full_app()",
+      "description": "**Situation:** `run_full_app()` is the GUI entry point — it constructs `SFFSCore`, launches the login dialog, and wires the threat callback before the main window appears.\n\n**Mechanism:** Lines 159–170 wire `detect_isolation()` to the security badge and attach `win.showSecurityAlert` to the process monitor's threat callback. The app won't reach `win.show()` unless `SFFSCore.initialize()` succeeds.\n\n**Implication:** The security badge reflects actual OS isolation state — it's not cosmetic.\n\n**Gotcha:** The Windows Job Object activation (lines 124–128) is attempted silently; if ctypes is unavailable the badge shows ⚠ but the app still runs."
+    },
+    {
+      "file": "main-code/sffs_core.py",
+      "line": 78,
+      "title": "SFFSCore — session state machine",
+      "description": "**Situation:** `SFFSCore` is a singleton that owns all mutable session state: `session_token`, `sandbox`, `_session_password`, and the active worker/viewer PID sets.\n\n**Mechanism:** State advances strictly: `initialize()` → `login()` → encrypt/decrypt ops → `logout()` or `_on_threat_detected()`. The `_require_session()` guard (line 270) throws if any op is attempted without a live session.\n\n**Implication:** There is no way to call `encryptFileOperation()` or `decryptFileOperation()` without a valid session — the guard is on every hot path.\n\n**Gotcha:** `_session_password` is a `bytearray` so it can be wiped. The `secureMemoryWipe()` call in `logout()` (line 256) is the guarantee — if you add a new code path that exits early, you must wipe there too."
+    },
+    {
+      "file": "code2/f09_authenticate_user.py",
+      "line": 57,
+      "title": "Timing attack protection — _DUMMY_HASH",
+      "description": "**Situation:** Without a dummy hash, an attacker can enumerate valid usernames: unknown users return in ~0 ms while valid users wait ~100 ms for Argon2 verification.\n\n**Mechanism:** `_DUMMY_HASH` is pre-computed once at module load. When a username is not found in the DB, `pw.verify(_DUMMY_HASH, ...)` is called anyway — consuming the same ~100 ms Argon2 time budget — before returning `authenticated: False`.\n\n**Implication:** Username enumeration via timing is closed. The response time for unknown vs. wrong-password is statistically indistinguishable.\n\n**Gotcha:** `pw = PasswordHasher(...)` must be instantiated *before* the DB query (line 185), not after. Instantiating it after the early-return branch is the original bug — `_DUMMY_HASH` would be unreachable and the timing gap would reopen."
+    },
+    {
+      "file": "code2/f09_authenticate_user.py",
+      "line": 166,
+      "title": "authenticateUser — lockout & constant-time compare",
+      "description": "**Situation:** Password verification and account lockout enforcement are in one function with a strict ordering: lockout check → Argon2 verify → session token generation.\n\n**Mechanism:** Line 185: `pw = PasswordHasher(...)` first. Line 219: lockout window checked before any verify attempt — locked accounts never reach Argon2. Line 232: `pw.verify()` in a `try/finally` block — the `finally` calls `secureMemoryWipe(password)` even if an unexpected exception propagates.\n\n**Implication:** Memory wipe is guaranteed regardless of exception type. Lockout is enforced before any expensive crypto, preventing CPU-exhaustion via lockout bypass.\n\n**Gotcha:** `hmac.compare_digest` is not used here because Argon2's `verify()` is already constant-time. Adding a second compare would not improve security and would suggest the author doesn't understand Argon2's API."
+    },
+    {
+      "file": "code2/f07_create_isolated_sandbox.py",
+      "line": 70,
+      "title": "Isolated sandbox — stale wipe + restrictive ACLs",
+      "description": "**Situation:** Decrypted plaintext must never linger on disk across session boundaries. The sandbox is a per-session directory with OS-level access controls.\n\n**Mechanism:** `_wipe_stale_sandboxes()` is called first — any `sandbox_*` directory older than 24 h (or without a lock file) is secure-wiped before the new sandbox is created. On Linux, `chmod 0o700` is applied to the root and all three subdirectories (lines 110, 143–145). On Windows, `icacls /inheritance:r` removes inherited ACLs.\n\n**Implication:** Crash-leftover sandboxes containing plaintext are wiped at the next startup. There is no window where a previous session's decrypted files are accessible.\n\n**Gotcha:** The Windows `icacls` call raises `RuntimeError` on failure (line 130) — the sandbox is deleted before raising so an unprotected directory never lingers. This is a fail-closed design."
+    },
+    {
+      "file": "main-code/sffs_core.py",
+      "line": 512,
+      "title": "Subprocess isolation — master password via stdin, not CLI args",
+      "description": "**Situation:** Decryption runs in a child process (`isolated_worker.py`) for privilege separation. The master password must reach the worker without appearing in the process argument list.\n\n**Mechanism:** The `payload` dict (lines 537–545) deliberately excludes `master_password`. The password is delivered via `proc.communicate(input=master_password + \"\\n\", ...)` (line 572–576) — it travels over stdin, which is not visible in `ps aux`, `tasklist /V`, or `/proc/<pid>/cmdline`.\n\n**Implication:** The master password is never in the process argument list. An attacker with `ps` access cannot harvest it from the command line.\n\n**Gotcha:** The IPC envelope (lines 590–603) is HMAC-SHA256 signed with `_ipc_secret` — a per-session secret in an env var. This prevents a rogue process from injecting a crafted payload, even if it can observe the stdout of the worker."
+    },
+    {
+      "file": "main-code/wrap_store.py",
+      "line": 57,
+      "title": "WrapStore — encrypted SQLite key store",
+      "description": "**Situation:** RSA-wrapped AES keys must be stored durably but never in plaintext. `_DbContext` is a context manager that decrypts to a temp SQLite file, operates, then re-encrypts.\n\n**Mechanism:** `__enter__` decrypts `wrap_store.enc` → temp `.db` file (in `sandbox/temp/`, not `/tmp` — line 68). `__exit__` re-encrypts and deletes the temp file in a `finally` block (lines 84–96) — the plaintext DB never survives the context manager even on exception.\n\n**Implication:** The decrypted keystore DB is scoped to the sandbox temp directory, which `destroySandbox()` wipes on logout. No plaintext keys leak to the host filesystem.\n\n**Gotcha:** The temp file path uses `sandbox[\"temp_dir\"]` (passed as `tmp_dir` from `sffs_core.py:222`). If `tmp_dir` is `None` it falls back to the system temp dir — a regression to watch for if `WrapStore` is ever constructed without `SFFSCore.login()`."
+    },
+    {
+      "file": "main-code/sffs_core.py",
+      "line": 462,
+      "title": "Pre-open integrity gate — validate_before_open()",
+      "description": "**Situation:** A file placed into the sandbox directory by an attacker (or tampered after decryption) must never be opened. `validate_before_open()` is called by `sandbox_viewer` before launching any viewer.\n\n**Mechanism:** Two checks: (1) file must be in `_decrypted_registry` — i.e., placed there by this session's `decryptFileOperation()`; (2) SHA-256 of the file on disk must match `hash_pre` recorded at encrypt time. On failure the file is secure-wiped before raising `SecurityError`.\n\n**Implication:** Post-decrypt tampering and foreign file injection are both caught before the file reaches a viewer process. The sandbox watcher (line 412) also continuously evicts foreign files every 2 seconds.\n\n**Gotcha:** The registry key is the *resolved* absolute path (`Path.resolve()`). A symlink pointing into the sandbox from outside would not match — it's blocked."
+    },
+    {
+      "file": "code3/sffs_ui.py",
+      "line": 1007,
+      "title": "SecurityPage — live threat dashboard",
+      "description": "**Situation:** The Security tab in the UI must reflect real OS isolation state and process monitor output — not cached or hardcoded values.\n\n**Mechanism:** A `QTimer` fires every 3 000 ms calling `_refresh_all()`, which calls `_refresh_isolation()` (queries `detect_isolation()` live), `_refresh_procs()` (calls `checkSuspiciousProcesses()` and `isDebuggerPresent()`), and `_refresh_logs()` (reads last 10 audit entries from SQLite).\n\n**Implication:** Within 3 seconds of a threat appearing, the UI badge changes from green to red. The process monitor runs in a background thread and calls `_on_threat_detected()` which triggers `emergencyLock()` independently of the UI refresh.\n\n**Gotcha:** `_refresh_procs()` is deliberately wrapped in a bare `except: pass` (line 1111) — a broken psutil import must not crash the UI. The process monitor thread is the real enforcement path; the UI is diagnostic only."
+    },
+    {
+      "file": "code3/sffs_ui.py",
+      "line": 1623,
+      "title": "Threaded encrypt — UI stays responsive",
+      "description": "**Situation:** `encryptFileOperation()` can take several seconds for large files. Running it on the Qt main thread freezes the window.\n\n**Mechanism:** `_do_encrypt()` checks entropy readiness (showing `EntropyCollectorDialog` if needed), then wraps the core call in a `WorkerThread` (from `f18_thread_controller.py`). The worker is stored in `self._enc_worker` — a critical instance variable that prevents Qt from garbage-collecting the thread mid-run.\n\n**Implication:** The UI remains interactive during encryption. The progress bar shows indeterminate mode (`setMaximum(0)`) and buttons are disabled to prevent re-entrant calls.\n\n**Gotcha:** The worker reference *must* be an instance variable. Assigning to a local variable causes Qt to GC the thread immediately after `start()`, producing a silent crash. This was the `_WorkerThread` naming bug fixed in this codebase."
+    },
+    {
+      "directory": "tests",
+      "title": "Test coverage — what's verified, what's not",
+      "description": "**Situation:** 139 tests covering crypto, auth, sandbox, hardening, and integration.\n\n**What's covered:** Argon2 timing equalization (`test_student2.py`), sandbox wipe on destroy, worker payload signing, WrapStore encrypt/decrypt round-trip, emergency lock, provenance verification.\n\n**What to probe:** Network-path tests are absent (Google Drive sync is mocked). The `SecurityPage` timer refresh is UI-only and not unit-tested — check it manually during demo.\n\n**Gotcha:** GUI tests run under `xvfb` in CI (`continue-on-error: true`). A failing GUI test won't block the CI gate — verify manually before demo day."
+    }
+  ]
+}
